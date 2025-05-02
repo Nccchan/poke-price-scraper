@@ -11,8 +11,8 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 # ── ここを書き替えて他はそのまま ─────────────────────
-KEYWORD      = "ロケット団の栄光 BOX シュリンク付 "
-PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付）"
+KEYWORD      = "ロケット団の栄光 BOX シュリンク付 新品"
+PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付・新品）"
 # ────────────────────────────────────────────────
 
 CSV_FILE    = Path("latest.csv")
@@ -24,9 +24,9 @@ def fetch_prices(keyword: str) -> list[int]:
         "https://jp.mercari.com/search"
         f"?keyword={quote_plus(keyword)}"
         "&sort=score&order=desc&item_status=on_sale"
-        "&price_min=10000"    # 最低価格10,000円以上を指定
-        "&category_id=676"    # カテゴリID: おもちゃ・ホビー・グッズ > トレーディングカード
-        "&condition_id=1"     # 商品の状態: 新品、未使用
+        "&price_min=5000"     # 最低価格を5,000円に下げる
+        # カテゴリIDは一時的に除外
+        # 商品状態の条件も一時的に除外
     )
     
     prices = []
