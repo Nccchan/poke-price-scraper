@@ -11,29 +11,16 @@ from statistics import median
 from urllib.parse import quote_plus
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ── キーワードと表示名だけ編集 ──────────────────────────────
+# ── キーワードと表示名だけ必要に応じて変更 ───────────────────
 KEYWORD      = "ロケット団の栄光 BOX シュリンク付き"
 PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付き）"
-# ──────────────────────────────────────────────────
+# ────────────────────────────────────────────────
 
-CSV_FILE = Path("latest.csv")
-NAV_TIMEOUT = 60_000        # navigation / selector 待ちを 60 秒に拡張
-
-
-def _collect_prices(page) -> list[int]:
-    """page から価格テキストを抜き出して数値リストを返す"""
-    texts = page.eval_on_selector_all(
-        'li[data-testid="item-cell"] span',
-        'els => els.map(e => e.textContent)'
-    )
-    return [
-        int(re.sub(r"[^\d]", "", t))
-        for t in texts if re.search(r"¥\s*\d", t)
-    ]
-
+CSV_FILE    = Path("latest.csv")
+NAV_TIMEOUT = 60_000         # ms
 
 def fetch_prices(keyword: str) -> list[int]:
-    """Playwright で検索ページを開き、販売中商品の価格リストを返す"""
+    """Playwright で検索ページを開き、販売中価格の int リストを返す"""
     url = (
         "https://jp.mercari.com/search"
         f"?keyword={quote_plus(keyword)}"
@@ -41,35 +28,47 @@ def fetch_prices(keyword: str) -> list[int]:
     )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"]
-        )
+        browser = p.chromium.launch(headless=True,
+                                    args=["--disable-blink-features=AutomationControlled"])
         page = browser.new_page(locale="ja-JP")
         page.set_default_navigation_timeout(NAV_TIMEOUT)
 
-        def try_once() -> list[int] | None:
-            try:
-                page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT)
-                for _ in range(6):     # 自動スクロール
-                    page.mouse.wheel(0, 1000)
-                    time.sleep(0.4)
-                return _collect_prices(page)
-            except PWTimeout:
-                return None
+        def try_once() -> list[int]:
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT)
 
-        prices = try_once()
-        if not prices:           # 1 回目失敗なら 5 秒待ってもう 1 度
-            time.sleep(5)
+            # 自動スクロールで追加商品をロード
+            for _ in range(8):          # 8×1000px = 8000px
+                page.mouse.wheel(0, 1000)
+                time.sleep(0.5)
+
+            # DOM から価格をすべて取得
+            texts = page.eval_on_selector_all(
+                'li[data-testid="item-cell"] span',
+                'els => els.map(e => e.textContent)'
+            )
+            prices = [
+                int(re.sub(r"[^\d]", "", t))
+                for t in texts if re.search(r"¥\\s*\\d", t)
+            ]
+            return prices
+
+        try:
             prices = try_once()
+        except PWTimeout:
+            prices = []
 
         browser.close()
 
+    if not prices:
+        print("[WARN] 価格が 0 件でした。キーワードや待機時間を調整してください。")
+        return []
+
     prices.sort()
-    if len(prices) >= 10:        # 外れ値 10 % を削除
+    if len(prices) >= 10:           # 外れ値 10 % カット
         k = len(prices) // 10
         prices = prices[k: len(prices) - k]
+    print(f"[INFO] ヒット件数 = {len(prices)}")
     return prices
 
 
