@@ -9,19 +9,31 @@ import re, csv, sys, time, datetime as dt
 from pathlib import Path
 from statistics import median
 from urllib.parse import quote_plus
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from playwright.sync_api import sync_playwright
-
-# ── キーワードと表示名をここで設定 ───────────────────────────────
+# ── キーワードと表示名だけ編集 ──────────────────────────────
 KEYWORD      = "ロケット団の栄光 BOX シュリンク付き"
 PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付き）"
-# ────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────
 
 CSV_FILE = Path("latest.csv")
+NAV_TIMEOUT = 60_000        # navigation / selector 待ちを 60 秒に拡張
+
+
+def _collect_prices(page) -> list[int]:
+    """page から価格テキストを抜き出して数値リストを返す"""
+    texts = page.eval_on_selector_all(
+        'li[data-testid="item-cell"] span',
+        'els => els.map(e => e.textContent)'
+    )
+    return [
+        int(re.sub(r"[^\d]", "", t))
+        for t in texts if re.search(r"¥\s*\d", t)
+    ]
 
 
 def fetch_prices(keyword: str) -> list[int]:
-    """Playwright でメルカリ検索 → 販売中価格のリストを返す"""
+    """Playwright で検索ページを開き、販売中商品の価格リストを返す"""
     url = (
         "https://jp.mercari.com/search"
         f"?keyword={quote_plus(keyword)}"
@@ -29,38 +41,35 @@ def fetch_prices(keyword: str) -> list[int]:
     )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(locale="ja-JP")
-        page.goto(url, timeout=30_000)
-        # ネットワークが静かになるまで待機
-        page.wait_for_load_state("networkidle")
-
-        # ── 自動スクロールで追加商品をロード ──────────────────
-        for _ in range(6):            # 6×1000px ≒ 6000px
-            page.mouse.wheel(0, 1000)
-            time.sleep(0.4)           # Ajaxロード待ち
-        # ──────────────────────────────────────────────────
-
-        # DOM から価格テキストを全部取得
-        texts = page.eval_on_selector_all(
-            'li[data-testid="item-cell"] span',
-            'els => els.map(e => e.textContent)'
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
         )
+        page = browser.new_page(locale="ja-JP")
+        page.set_default_navigation_timeout(NAV_TIMEOUT)
+
+        def try_once() -> list[int] | None:
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+                page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT)
+                for _ in range(6):     # 自動スクロール
+                    page.mouse.wheel(0, 1000)
+                    time.sleep(0.4)
+                return _collect_prices(page)
+            except PWTimeout:
+                return None
+
+        prices = try_once()
+        if not prices:           # 1 回目失敗なら 5 秒待ってもう 1 度
+            time.sleep(5)
+            prices = try_once()
+
         browser.close()
 
-    # "¥12,345" → 12345 に変換
-    prices = [
-        int(re.sub(r"[^\d]", "", t))
-        for t in texts
-        if re.search(r"¥\s*\d", t)
-    ]
     prices.sort()
-
-    # 外れ値 10% を除外
-    if len(prices) >= 10:
+    if len(prices) >= 10:        # 外れ値 10 % を削除
         k = len(prices) // 10
-        prices = prices[k : len(prices) - k]
-
+        prices = prices[k: len(prices) - k]
     return prices
 
 
