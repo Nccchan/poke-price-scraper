@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-日本円表示に固定したメルカリ価格収集ボット（最終版）
-ロケール設定とCookieを使って常に日本円表示でスクレイピング
+完全な日本円表示対応メルカリ価格収集ボット
+強化されたロケール設定とUSD検出機能を兼ね備えた最終版
 """
 
 import json, re, csv, sys, time, datetime as dt, os, random, subprocess
@@ -32,6 +32,7 @@ REQUEST_DELAY_MAX = 10                    # リクエスト間の最大待機時
 MAX_ITEMS = 30                            # 取得する最大商品数
 SCROLL_COUNT = 2                          # スクロール回数（ページ数の制限）
 DEBUG_MODE = True                         # デバッグモード（スクリーンショットなど詳細情報を出力）
+USD_TO_JPY = 152                          # USD→JPYの換算レート (2025年5月現在)
 # ────────────────────────────────────────────────
 
 def run_git_command(command):
@@ -133,7 +134,7 @@ def save_state(state):
 
 def fetch_prices(keyword: str, retry_count=0) -> list[int]:
     """指定したキーワードでメルカリを検索し、販売中商品の価格リストを返す（ページ数制限あり）"""
-    # 以前成功したURLパターン + 最小のオプション
+    # 検索URL
     url = (
         "https://jp.mercari.com/search"
         f"?keyword={quote_plus(keyword)}"
@@ -152,33 +153,96 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
     
     prices = []
     with sync_playwright() as p:
+        # 強化されたロケール設定でブラウザを起動
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=USER_AGENT,
             locale="ja-JP",
+            timezone_id="Asia/Tokyo",
             viewport={"width": 1280, "height": 800},
-            timezone_id="Asia/Tokyo"  # タイムゾーンを東京に設定
+            # 明示的な国表示用のHTTPヘッダー
+            extra_http_headers={
+                "Accept-Language": "ja-JP,ja;q=0.9",
+                "X-Forwarded-For": "133.218.88.158"  # 日本のIPアドレス
+            }
         )
         page = context.new_page()
         page.set_default_navigation_timeout(NAV_TIMEOUT)
-        
-        try:
-            # 日本のロケールを強制するCookieを設定
-            page.context.add_cookies([{
+
+        # 日本ロケールのCookie設定
+        page.context.add_cookies([
+            {
                 "name": "country", 
                 "value": "jp",
                 "domain": "jp.mercari.com",
                 "path": "/"
-            }, {
+            }, 
+            {
                 "name": "lang", 
                 "value": "ja",
                 "domain": "jp.mercari.com", 
                 "path": "/"
-            }])
-            
-            # 初期読み込み
+            },
+            {
+                "name": "locale",
+                "value": "ja-JP",
+                "domain": "jp.mercari.com", 
+                "path": "/"
+            },
+            {
+                "name": "currency",
+                "value": "JPY",
+                "domain": "jp.mercari.com", 
+                "path": "/"
+            }
+        ])
+
+        # ページロード前にJavaScriptを注入して地域設定を上書き
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'language', {
+                get: function() { return 'ja-JP'; }
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: function() { return ['ja-JP', 'ja']; }
+            });
+            Object.defineProperty(navigator, 'geolocation', {
+                get: function() { 
+                    return {
+                        getCurrentPosition: function(success) {
+                            success({
+                                coords: {
+                                    latitude: 35.6895,
+                                    longitude: 139.6917,
+                                    accuracy: 10
+                                }
+                            });
+                        }
+                    }; 
+                }
+            });
+        """)
+
+        try:
+            # ページロード後に明示的に通貨をJPYに設定するスクリプトを実行
             page.goto(url, wait_until="domcontentloaded")
-            print(f"[INFO] ページ読み込み完了: {keyword}")
+            time.sleep(3)  # 短い待機
+            
+            # 明示的な通貨設定を試行
+            page.evaluate("""() => {
+                try {
+                    if (window.localStorage) {
+                        window.localStorage.setItem('currency', 'JPY');
+                    }
+                    if (window.sessionStorage) {
+                        window.sessionStorage.setItem('currency', 'JPY');
+                    }
+                    // Cookie も JavaScript から設定
+                    document.cookie = "currency=JPY; path=/; domain=jp.mercari.com";
+                } catch (e) {
+                    console.error("Could not set currency", e);
+                }
+            }""")
+            print(f"[INFO] 通貨設定を JPY に変更しました")
             
             # 初期表示の待機時間（長めに設定）
             print("[INFO] 初期ページ表示待機中...")
@@ -189,6 +253,18 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                 screenshot_path = debug_dir / f"{safe_keyword}_initial.png"
                 page.screenshot(path=str(screenshot_path))
                 print(f"[DEBUG] 初期表示スクリーンショット: {screenshot_path}")
+            
+            # 通貨切替ボタンを探す試み
+            try:
+                currency_selector = '[data-testid="currency-button"]'
+                if page.locator(currency_selector).count() > 0:
+                    print("[INFO] 通貨切替ボタンを検出しました。日本円表示に変更します。")
+                    page.click(currency_selector)
+                    time.sleep(2)
+                    page.click('text="JPY"')  # 日本円を選択
+                    time.sleep(3)
+            except Exception as e:
+                print(f"[INFO] 通貨切替を試みましたが失敗しました: {e}")
             
             # 以前成功したセレクタを優先的に試す
             selectors = [
@@ -238,7 +314,7 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                     page.screenshot(path=str(screenshot_path))
                     print(f"[DEBUG] スクロール{step}後のスクリーンショット: {screenshot_path}")
             
-            # DOM から価格を取得する試み
+            # DOM から価格を取得する試み（USD/JPY両対応）
             dom_prices = []
             for price_selector in selectors:
                 try:
@@ -261,18 +337,40 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                                 print(f"[INFO] 商品数を{MAX_ITEMS}に制限します")
                                 texts = texts[:MAX_ITEMS]
                             
-                            # 価格テキストから数字だけを抽出
+                            # 価格テキストから数字だけを抽出（JPYとUSD両方対応）
                             for t in texts:
                                 if t and re.search(r"\d", t):
-                                    # 円マーク（¥）の後の数字を抽出
-                                    match = re.search(r'[¥￥]([0-9,]+)', t)
-                                    if match:
+                                    # JPY（日本円）の検索
+                                    jpy_match = re.search(r'[¥￥]([0-9,]+)', t)
+                                    if jpy_match:
                                         try:
-                                            price_str = match.group(1).replace(',', '')
+                                            price_str = jpy_match.group(1).replace(',', '')
                                             price = int(price_str)
                                             # 妥当な価格範囲（例：5,000円〜200,000円）
                                             if 1000 <= price <= 200000:
+                                                print(f"[DEBUG] 円価格検出: ¥{price}")
                                                 dom_prices.append(price)
+                                                continue
+                                        except ValueError:
+                                            pass
+                                    
+                                    # USD（米ドル）の検索
+                                    usd_match = re.search(r'\$([0-9,.]+)', t)
+                                    if usd_match:
+                                        try:
+                                            price_str = usd_match.group(1).replace(',', '')
+                                            # 小数点以下を処理
+                                            if '.' in price_str:
+                                                price_parts = price_str.split('.')
+                                                price_dollars = int(price_parts[0])
+                                            else:
+                                                price_dollars = int(price_str)
+                                            
+                                            # USDをJPYに変換
+                                            price_jpy = int(price_dollars * USD_TO_JPY)
+                                            if 1000 <= price_jpy <= 200000:
+                                                print(f"[DEBUG] ドル価格検出: ${price_dollars} -> ¥{price_jpy}")
+                                                dom_prices.append(price_jpy)
                                         except ValueError:
                                             pass
                             
@@ -297,18 +395,41 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                             
                             if texts:
                                 print(f"[INFO] Found {len(texts)} prices with JS eval: {price_selector}")
+                                print(f"[DEBUG] Sample JS texts: {texts[:3]}")
                                 
-                                # 価格テキストから数字だけを抽出
+                                # 価格テキストから数字だけを抽出（JPYとUSD両方対応）
                                 js_prices = []
                                 for t in texts:
                                     if t and re.search(r"\d", t):
-                                        match = re.search(r'[¥￥]([0-9,]+)', t)
-                                        if match:
+                                        # JPY（日本円）の検索
+                                        jpy_match = re.search(r'[¥￥]([0-9,]+)', t)
+                                        if jpy_match:
                                             try:
-                                                price_str = match.group(1).replace(',', '')
+                                                price_str = jpy_match.group(1).replace(',', '')
                                                 price = int(price_str)
                                                 if 1000 <= price <= 200000:
                                                     js_prices.append(price)
+                                                    continue
+                                            except ValueError:
+                                                pass
+                                        
+                                        # USD（米ドル）の検索
+                                        usd_match = re.search(r'\$([0-9,.]+)', t)
+                                        if usd_match:
+                                            try:
+                                                price_str = usd_match.group(1).replace(',', '')
+                                                # 小数点以下を処理
+                                                if '.' in price_str:
+                                                    price_parts = price_str.split('.')
+                                                    price_dollars = int(price_parts[0])
+                                                else:
+                                                    price_dollars = int(price_str)
+                                                    
+                                                # USDをJPYに変換
+                                                price_jpy = int(price_dollars * USD_TO_JPY)
+                                                if 1000 <= price_jpy <= 200000:
+                                                    print(f"[DEBUG] USD ${price_dollars} -> JPY ¥{price_jpy}")
+                                                    js_prices.append(price_jpy)
                                             except ValueError:
                                                 pass
                                 
@@ -333,23 +454,48 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                         f.write(html)
                     print(f"[DEBUG] HTMLソース保存: {html_path}")
                 
-                # 価格パターンを直接検索
-                price_pattern = r'[¥￥]([0-9,]+)'
-                direct_prices = re.findall(price_pattern, html)
-                if direct_prices:
-                    print(f"[INFO] Found {len(direct_prices)} prices with direct regex")
-                    regex_prices = []
-                    for p in direct_prices:
+                # 日本円価格パターンを直接検索
+                jpy_prices = []
+                jpy_pattern = r'[¥￥]([0-9,]+)'
+                jpy_matches = re.findall(jpy_pattern, html)
+                if jpy_matches:
+                    print(f"[INFO] Found {len(jpy_matches)} JPY prices in HTML")
+                    for p in jpy_matches:
                         try:
                             price = int(re.sub(r"[^\d]", "", p))
-                            if 1000 <= price <= 200000:  # 妥当な価格範囲
-                                regex_prices.append(price)
+                            if 1000 <= price <= 200000:
+                                jpy_prices.append(price)
                         except ValueError:
                             pass
-                    
-                    if regex_prices:
-                        print(f"[DEBUG] Direct regex price count = {len(regex_prices)}")
-                        dom_prices = regex_prices
+                
+                # 米ドル価格パターンを直接検索
+                usd_prices = []
+                usd_pattern = r'\$([0-9,.]+)'
+                usd_matches = re.findall(usd_pattern, html)
+                if usd_matches:
+                    print(f"[INFO] Found {len(usd_matches)} USD prices in HTML")
+                    for p in usd_matches:
+                        try:
+                            p = p.replace(',', '')
+                            if '.' in p:
+                                price_parts = p.split('.')
+                                price_dollars = int(price_parts[0])
+                                price_jpy = int(price_dollars * USD_TO_JPY)
+                            else:
+                                price_dollars = int(p)
+                                price_jpy = int(price_dollars * USD_TO_JPY)
+                                
+                            if 1000 <= price_jpy <= 200000:
+                                print(f"[DEBUG] USD ${price_dollars} -> JPY ¥{price_jpy}")
+                                usd_prices.append(price_jpy)
+                        except ValueError:
+                            pass
+                
+                # JPYとUSDの価格を組み合わせる
+                regex_prices = jpy_prices + usd_prices
+                if regex_prices:
+                    print(f"[DEBUG] Combined regex price count = {len(regex_prices)}")
+                    dom_prices = regex_prices
             
             # 最終スクリーンショット
             if DEBUG_MODE:
