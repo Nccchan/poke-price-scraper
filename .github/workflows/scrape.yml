@@ -1,4 +1,8 @@
 name: Daily Mercari scrape
+
+permissions:
+  contents: write
+
 on:
   schedule:
     - cron: "0 21 * * *"   # JST 06:00
