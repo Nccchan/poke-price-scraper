@@ -5,8 +5,10 @@ import requests
 from bs4 import BeautifulSoup
 
 URL = ("https://jp.mercari.com/search"
-       "?keyword=%E3%83%86%E3%83%A9%E3%82%B9%E3%82%BF%E3%83%AB%E3%83%95%E3%82%A7%E3%82%B9%20BOX%20%E3%82%B7%E3%83%A5%E3%83%AA%E3%83%B3%E3%82%AF%E4%BB%98%E3%81%8D"
+       "?keyword=%E3%83%AD%E3%82%B1%E3%83%83%E3%83%88%E5%9B%A3%E3%81%AE%E6%A0%84%E5%85%89%20BOX%20%E3%82%B7%E3%83%A5%E3%83%AA%E3%83%B3%E3%82%AF%E4%BB%98%E3%81%8D"
        "&sort=score&order=desc&item_status=on_sale")
+
+product_name = "ロケット団の栄光 BOX（シュリンク付き）"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; PriceScraper/1.0)",
