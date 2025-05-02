@@ -1,58 +1,55 @@
 #!/usr/bin/env python3
 """
-毎朝 06:00 JST に実行される GitHub Actions 用。
-メルカリ公式の公開 API から
-『ロケット団の栄光 BOX（シュリンク付き）』販売中商品の中央値を取り、
-latest.csv に追記します。
+GitHub Actions で毎朝 06:00 JST に実行。
+メルカリの検索結果を Playwright で開き、
+販売中商品の中央値を latest.csv に追記します。
 """
 
-import json, time, datetime as dt, csv, sys
+import re, csv, sys, time, datetime as dt
 from pathlib import Path
-import requests
+from statistics import median
+from urllib.parse import quote_plus
 
-# ── ここだけキーワードを変えれば他はそのまま動きます ─────────────
+from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
+
+# ── キーワードと表示名だけ書き換えれば他はそのまま ─────────
 KEYWORD      = "ロケット団の栄光 BOX シュリンク付き"
 PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付き）"
 # ────────────────────────────────────────
-
-API_URL = "https://api.mercari.jp/v2/entities:search"
-HEADERS = {
-    "User-Agent":   "MercariScraper/1.0",
-    "Content-Type": "application/json",
-    # これが無いと 400 になる
-    "X-Platform":   "web"
-}
 
 CSV_FILE = Path("latest.csv")
 
 
 def fetch_prices(keyword: str) -> list[int]:
-    """公式 API で販売中商品の価格リスト(int) を返す"""
-    time.sleep(1)                               # polite delay
-    payload = {
-        "pageToken": "",
-        "pageSize": 120,                        # 最高 120 件
-        "searchSessionId": "",
-        "indexRouting": "INDEX_ROUTING_SEARCH",
-        "thumbnailTypes": ["THUMBNAIL_TYPE_WEB"],
-        "keyword": keyword,
-        "sort": "SORT_SCORE",
-        "order": "ORDER_DESC",
-        "statusIds": ["STATUS_ON_SALE"]         # 販売中のみ
-    }
-    r = requests.post(API_URL, headers=HEADERS,
-                      data=json.dumps(payload), timeout=20)
-    r.raise_for_status()
-    js = r.json()
-    return [item["price"] for item in js.get("items", [])]
+    """Playwright で検索ページを開き、販売中商品の価格リストを返す"""
+    url = (
+        "https://jp.mercari.com/search"
+        f"?keyword={quote_plus(keyword)}"
+        "&sort=score&order=desc&item_status=on_sale"
+    )
 
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(locale="ja-JP")
+        page.goto(url, timeout=30_000)
+        # 商品カードが描画されるまで待機
+        page.wait_for_selector('li[data-testid="item-cell"]', timeout=30_000)
+        html = page.content()
+        browser.close()
 
-def median(lst: list[int]) -> int | None:
-    if not lst:
-        return None
-    s = sorted(lst)
-    m = len(s) // 2
-    return s[m] if len(s) % 2 else (s[m - 1] + s[m]) // 2
+    soup = BeautifulSoup(html, "lxml")
+    # 価格をすべて抽出（¥12,345 / ¥ 12,345 両対応）
+    prices = [
+        int(m.group(1).replace(",", ""))
+        for m in re.finditer(r"¥\s*([\d,]{3,})", soup.text)
+    ]
+    prices.sort()
+    # 外れ値 10% を除外
+    if len(prices) >= 10:
+        k = len(prices) // 10
+        prices = prices[k : len(prices) - k]
+    return prices
 
 
 def append_csv(date: str, product: str, price: int | None):
@@ -69,7 +66,7 @@ def main():
     today = dt.date.today().isoformat()
     try:
         prices = fetch_prices(KEYWORD)
-        med = median(prices)
+        med = round(median(prices)) if prices else None
         append_csv(today, PRODUCT_NAME, med)
         print(f"Appended {today}, price={med}")
     except Exception as e:
