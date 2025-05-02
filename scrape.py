@@ -2,7 +2,7 @@
 """
 GitHub Actions で毎朝 06:00 JST に実行。
 Playwright でメルカリ検索ページを開き、
-確実に価格を取得して latest.csv に中央値を追記します。
+販売中商品の中央値を latest.csv に追記します。
 """
 
 import json, re, csv, sys, time, datetime as dt
@@ -11,13 +11,13 @@ from urllib.parse import quote_plus
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ── ここだけ書き換え ──────────────────────────────
+# ── ここを書き換えれば他はそのまま ─────────────────────────
 KEYWORD      = "ロケット団の栄光 BOX シュリンク付き"
 PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付き）"
-# ────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────
 
 CSV_FILE    = Path("latest.csv")
-NAV_TIMEOUT = 90_000      # ms
+NAV_TIMEOUT = 90_000   # ms  (= 90 秒)
 
 def fetch_prices(keyword: str) -> list[int]:
     url = (
@@ -25,41 +25,50 @@ def fetch_prices(keyword: str) -> list[int]:
         f"?keyword={quote_plus(keyword)}"
         "&sort=score&order=desc&item_status=on_sale"
     )
+
     with sync_playwright() as p:
         page = p.chromium.launch(headless=True).new_page(locale="ja-JP")
         page.set_default_navigation_timeout(NAV_TIMEOUT)
+
+        # ページ読み込み
         page.goto(url, wait_until="domcontentloaded")
 
-        # ① 商品カードが描画されるまで最大 90 秒待つ
-        try:
-            page.wait_for_selector('[data-testid="item-cell"]',
-                                   timeout=NAV_TIMEOUT)
-        except PWTimeout:
-            print("[WARN] item-cell not found → 0 件判定")
-            return []
+        # 商品カードが出るまで待つ
+        page.wait_for_selector('[data-testid="item-cell"]',
+                               timeout=NAV_TIMEOUT)
 
-        # ② 自動スクロールで残り商品を Ajax ロード
-        for _ in range(10):            # 10×1000px = 1 万 px
+        # 追加ロードのため自動スクロール
+        for _ in range(10):              # 10 × 1000 px ≒ 1 万 px
             page.mouse.wheel(0, 1_000)
             time.sleep(0.6)
 
-        # ③ DOM から価格テキスト取得
+        time.sleep(2)                    # Ajax 描画完了待ち
+
+        # 価格スパンが描画されるまで最大 15 秒待機
+        try:
+            page.wait_for_selector('[data-testid="item-price"]',
+                                   timeout=15_000)
+        except PWTimeout:
+            print("[WARN] price spans not found (15 s timeout)")
+
+        # DOM から価格を取得
         dom_prices = [
             int(re.sub(r"[^\d]", "", t))
             for t in page.locator('[data-testid="item-price"]')
-                            .all_text_contents()
+                         .all_text_contents()
             if re.search(r"\d", t)
         ]
         print(f"[DEBUG] DOM price count = {len(dom_prices)}")
 
-        # ④ __NEXT_DATA__ JSON も保険で解析
+        # 保険として __NEXT_DATA__ の JSON も解析
         raw = page.locator('script#__NEXT_DATA__').text_content()
-    # Playwright セッション終了
+    # ここで Playwright セッション終了
 
     json_prices = []
     try:
         data = json.loads(raw)
-        # 再帰して 'price' を拾う
+
+        # 再帰して price を集める
         def rec(o):
             if isinstance(o, dict):
                 if "price" in o and isinstance(o["price"], int):
@@ -74,6 +83,7 @@ def fetch_prices(keyword: str) -> list[int]:
                     out += rec(v)
                 return out
             return []
+
         items = rec(data)
         json_prices = [
             it["price"] for it in items
@@ -83,13 +93,14 @@ def fetch_prices(keyword: str) -> list[int]:
     except Exception as e:
         print("[WARN] JSON parse error:", e)
 
+    # JSON が優先、無ければ DOM
     prices = json_prices or dom_prices
     prices.sort()
 
     # 外れ値 10 % カット
     if len(prices) >= 10:
         k = len(prices) // 10
-        prices = prices[k: len(prices) - k]
+        prices = prices[k : len(prices) - k]
     return prices
 
 def append_csv(date: str, product: str, price: int | None):
