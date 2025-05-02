@@ -1,45 +1,35 @@
 #!/usr/bin/env python3
-import re, time, datetime as dt, csv, sys
+import json, time, datetime as dt, csv, sys
 from pathlib import Path
 import requests
-from bs4 import BeautifulSoup
 
-URL = ("https://jp.mercari.com/search"
-       "?keyword=%E3%83%AD%E3%82%B1%E3%83%83%E3%83%88%E5%9B%A3%E3%81%AE%E6%A0%84%E5%85%89%20BOX%20%E3%82%B7%E3%83%A5%E3%83%AA%E3%83%B3%E3%82%AF%E4%BB%98%E3%81%8D"
-       "&sort=score&order=desc&item_status=on_sale")
-
+KEYWORD = "ロケット団の栄光 BOX シュリンク付き"
 product_name = "ロケット団の栄光 BOX（シュリンク付き）"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; PriceScraper/1.0)",
-    "Accept-Language": "ja,en-US;q=0.9",
-}
-
+API_URL = "https://api.mercari.jp/v2/entities:search"
+HEADERS = {"User-Agent": "MercariScraper/1.0", "Content-Type": "application/json"}
 CSV_FILE = Path("latest.csv")
 
-def fetch_prices(url: str) -> list[int]:
-    time.sleep(1)                              # polite delay
-    res = requests.get(url, headers=HEADERS, timeout=20)
+def fetch_prices(keyword: str) -> list[int]:
+    time.sleep(1)
+    payload = {
+        "query": keyword,
+        "page_size": 120,
+        "search_condition": {"status": ["on_sale"]},
+        "sort": "score",
+        "order": "desc"
+    }
+    res = requests.post(API_URL, headers=HEADERS, data=json.dumps(payload), timeout=20)
     res.raise_for_status()
-    
-    print("HTML length =", len(res.text))
-
-    soup = BeautifulSoup(res.text, "lxml")
-    price_texts = soup.find_all(text=re.compile(r"¥\d[\d,]*"))
-    prices = [int(p.replace("¥", "").replace(",", "")) for p in price_texts]
-    prices.sort()
-    n = len(prices)
-    if n >= 10:                                # 中央 ±10% で外れ値除去
-        k = n // 10
-        prices = prices[k:n - k]
-    return prices
+    js = res.json()
+    return [item["price"] for item in js.get("items", [])]
 
 def median(lst: list[int]) -> int | None:
     if not lst:
         return None
-    m = len(lst) // 2
     s = sorted(lst)
-    return s[m] if len(lst) % 2 else sum(s[m - 1:m + 1]) // 2
+    m = len(s) // 2
+    return s[m] if len(s) % 2 else sum(s[m-1:m+1]) // 2
 
 def append_csv(date: str, product: str, price: int | None):
     header = ["Date", "Product", "PriceJPY"]
@@ -52,11 +42,10 @@ def append_csv(date: str, product: str, price: int | None):
 
 def main():
     today = dt.date.today().isoformat()
-    product = "テラスタルフェス BOX（シュリンク付き）"
     try:
-        prices = fetch_prices(URL)
+        prices = fetch_prices(KEYWORD)
         med = median(prices)
-        append_csv(today, product, med)
+        append_csv(today, product_name, med)
         print(f"Appended {today}, price={med}")
     except Exception as e:
         print(f"[ERROR] {e}", file=sys.stderr)
