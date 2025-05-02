@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-商品別の価格がわかりやすいCSV形式に対応したメルカリ価格収集ボット
+Git操作を組み込んだメルカリ価格収集ボット
+CSVファイルを自動的にコミットしてリポジトリを更新
 """
 
-import json, re, csv, sys, time, datetime as dt, os, random
+import json, re, csv, sys, time, datetime as dt, os, random, subprocess
 from statistics import median
 from urllib.parse import quote_plus
 from pathlib import Path
@@ -21,17 +22,62 @@ PRODUCTS = [
 # ────────────────────────────────────────────────
 
 # ── 設定パラメータ ─────────────────────────────────
-CSV_FILE = Path("mercari_prices.csv")  # 結果CSV（ファイル名をわかりやすく変更）
-STATE_FILE = Path("progress.json")     # 進捗状態ファイル
-BATCH_SIZE = 3                         # バッチあたりの商品数
-MAX_RETRIES = 3                        # 最大リトライ回数
-NAV_TIMEOUT = 60_000                   # ナビゲーションタイムアウト(ms)
+CSV_FILE = Path("mercari_prices.csv")     # 結果CSV
+STATE_FILE = Path("progress.json")        # 進捗状態ファイル
+BATCH_SIZE = 3                            # バッチあたりの商品数
+MAX_RETRIES = 3                           # 最大リトライ回数
+NAV_TIMEOUT = 60_000                      # ナビゲーションタイムアウト(ms)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-REQUEST_DELAY_MIN = 5                  # リクエスト間の最小待機時間(秒)
-REQUEST_DELAY_MAX = 10                 # リクエスト間の最大待機時間(秒)
-MAX_ITEMS = 30                         # 取得する最大商品数
-SCROLL_COUNT = 2                       # スクロール回数（ページ数の制限）
+REQUEST_DELAY_MIN = 5                     # リクエスト間の最小待機時間(秒)
+REQUEST_DELAY_MAX = 10                    # リクエスト間の最大待機時間(秒)
+MAX_ITEMS = 30                            # 取得する最大商品数
+SCROLL_COUNT = 2                          # スクロール回数（ページ数の制限）
 # ────────────────────────────────────────────────
+
+def run_git_command(command):
+    """Gitコマンドを実行する"""
+    try:
+        result = subprocess.run(command, shell=True, check=True, 
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                              text=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Git command failed: {e}")
+        print(f"STDOUT: {e.stdout}")
+        print(f"STDERR: {e.stderr}")
+        return None
+
+def setup_git():
+    """Git設定を行う"""
+    # Gitユーザー設定
+    run_git_command('git config --local user.name "github-actions[bot]"')
+    run_git_command('git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"')
+    print("[INFO] Git user configured")
+
+def commit_files(date):
+    """ファイルをGitリポジトリにコミットする"""
+    # ファイルをステージングに追加
+    print("[INFO] Adding files to Git staging area...")
+    run_git_command(f'git add {CSV_FILE}')
+    
+    # 日別サマリーファイルが存在する場合は追加
+    summary_file = Path(f"summary_{date}.csv")
+    if summary_file.exists():
+        run_git_command(f'git add {summary_file}')
+    
+    # コミットする
+    print("[INFO] Committing changes...")
+    commit_message = f"data: メルカリ価格データ更新 ({date})"
+    run_git_command(f'git commit -m "{commit_message}"')
+    
+    # 変更をプッシュ
+    print("[INFO] Pushing changes to remote repository...")
+    push_result = run_git_command('git push')
+    
+    if push_result is not None:
+        print("[INFO] Successfully pushed changes to Git repository")
+    else:
+        print("[ERROR] Failed to push changes to Git repository")
 
 def load_state():
     """進捗状態を読み込む。存在しない場合は新規作成"""
@@ -296,7 +342,10 @@ def generate_daily_summary(date, results):
     print(f"[INFO] 日別サマリー出力完了: {summary_file}")
 
 def main():
-    """メイン処理：バッチ処理で商品情報を取得"""
+    """メイン処理：バッチ処理で商品情報を取得、結果をGitにコミット"""
+    # Git設定
+    setup_git()
+    
     today = dt.date.today().isoformat()
     
     # 状態を読み込み
@@ -355,6 +404,9 @@ def main():
             
             # 日別サマリーを生成
             generate_daily_summary(today, all_results)
+            
+            # ファイルをGitにコミットしてプッシュ
+            commit_files(today)
             
             state["last_update"] = today
             save_state(state)
