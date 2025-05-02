@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-「シュリンク付」を含む最適化されたメルカリ価格収集ボット
-正常動作した条件と最新の改善点を組み合わせた最終版
+日本円表示に固定したメルカリ価格収集ボット（最終版）
+ロケール設定とCookieを使って常に日本円表示でスクレイピング
 """
 
 import json, re, csv, sys, time, datetime as dt, os, random, subprocess
@@ -10,7 +10,7 @@ from urllib.parse import quote_plus
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ── 検索対象商品リスト（成功したキーワード仕様） ─────────────────────────────
+# ── 検索対象商品リスト ─────────────────────────────
 PRODUCTS = [
     {"name": "ロケット団の栄光 BOX", "keyword": "ロケット団の栄光 BOX シュリンク付"},
     {"name": "熱風のアリーナ BOX", "keyword": "熱風のアリーナ BOX シュリンク付"},
@@ -156,12 +156,26 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
         context = browser.new_context(
             user_agent=USER_AGENT,
             locale="ja-JP",
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 1280, "height": 800},
+            timezone_id="Asia/Tokyo"  # タイムゾーンを東京に設定
         )
         page = context.new_page()
         page.set_default_navigation_timeout(NAV_TIMEOUT)
         
         try:
+            # 日本のロケールを強制するCookieを設定
+            page.context.add_cookies([{
+                "name": "country", 
+                "value": "jp",
+                "domain": "jp.mercari.com",
+                "path": "/"
+            }, {
+                "name": "lang", 
+                "value": "ja",
+                "domain": "jp.mercari.com", 
+                "path": "/"
+            }])
+            
             # 初期読み込み
             page.goto(url, wait_until="domcontentloaded")
             print(f"[INFO] ページ読み込み完了: {keyword}")
@@ -250,13 +264,14 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                             # 価格テキストから数字だけを抽出
                             for t in texts:
                                 if t and re.search(r"\d", t):
+                                    # 円マーク（¥）の後の数字を抽出
                                     match = re.search(r'[¥￥]([0-9,]+)', t)
                                     if match:
                                         try:
                                             price_str = match.group(1).replace(',', '')
                                             price = int(price_str)
-                                            # 妥当な価格範囲（例：5,000円〜100,000円）
-                                            if 5000 <= price <= 100000:
+                                            # 妥当な価格範囲（例：5,000円〜200,000円）
+                                            if 1000 <= price <= 200000:
                                                 dom_prices.append(price)
                                         except ValueError:
                                             pass
@@ -292,7 +307,7 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                                             try:
                                                 price_str = match.group(1).replace(',', '')
                                                 price = int(price_str)
-                                                if 5000 <= price <= 100000:
+                                                if 1000 <= price <= 200000:
                                                     js_prices.append(price)
                                             except ValueError:
                                                 pass
@@ -325,13 +340,12 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                     print(f"[INFO] Found {len(direct_prices)} prices with direct regex")
                     regex_prices = []
                     for p in direct_prices:
-                        if re.search(r"\d", p):
-                            try:
-                                price = int(re.sub(r"[^\d]", "", p))
-                                if 5000 <= price <= 100000:
-                                    regex_prices.append(price)
-                            except ValueError:
-                                pass
+                        try:
+                            price = int(re.sub(r"[^\d]", "", p))
+                            if 1000 <= price <= 200000:  # 妥当な価格範囲
+                                regex_prices.append(price)
+                        except ValueError:
+                            pass
                     
                     if regex_prices:
                         print(f"[DEBUG] Direct regex price count = {len(regex_prices)}")
