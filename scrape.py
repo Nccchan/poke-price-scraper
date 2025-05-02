@@ -59,6 +59,16 @@ def fetch_prices(keyword: str) -> list[int]:
     prices = []
     try:
         data = json.loads(raw)
+            # --- デバッグ: 最初の3件を確認 ---------------------------
+    preview = (
+        data.get("props", {})
+            .get("pageProps", {})
+            .get("initialState", {})
+            .get("search", {})
+            .get("items", [])
+    )[:3]
+    print("[DEBUG] preview:", json.dumps(preview, ensure_ascii=False)[:500])
+    # ----------------------------------------------------------
         found = recursive_find_prices(data)
         if found:
             prices = [int(v) for v in found if isinstance(v, int)]
