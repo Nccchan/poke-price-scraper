@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Git操作を組み込んだメルカリ価格収集ボット
-CSVファイルを自動的にコミットしてリポジトリを更新
+「シュリンク付」を含む最適化されたメルカリ価格収集ボット
+正常動作した条件と最新の改善点を組み合わせた最終版
 """
 
 import json, re, csv, sys, time, datetime as dt, os, random, subprocess
@@ -10,14 +10,13 @@ from urllib.parse import quote_plus
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ── 検索対象商品リスト ─────────────────────────────
+# ── 検索対象商品リスト（成功したキーワード仕様） ─────────────────────────────
 PRODUCTS = [
     {"name": "ロケット団の栄光 BOX", "keyword": "ロケット団の栄光 BOX シュリンク付"},
-    {"name": "熱風のアリーナ BOX", "keyword": "ポケモンカード 熱風のアリーナ BOX シュリンク付"},
-    {"name": "バトルパートナーズ BOX", "keyword": "ポケモンカード バトルパートナーズ BOX シュリンク付"},
-    {"name": "テラスタルフェスティバル BOX", "keyword": "ポケモンカード テラスタルフェスティバル BOX シュリンク付"},
-    {"name": "超電ブレイカー BOX", "keyword": "ポケモンカード 超電ブレイカー BOX シュリンク付"},
-    # 他のカード商品を追加...
+    {"name": "熱風のアリーナ BOX", "keyword": "熱風のアリーナ BOX シュリンク付"},
+    {"name": "バトルパートナーズ BOX", "keyword": "バトルパートナーズ BOX シュリンク付"},
+    {"name": "テラスタルフェスティバル BOX", "keyword": "テラスタルフェスティバル BOX シュリンク付"},
+    {"name": "超電ブレイカー BOX", "keyword": "超電ブレイカー BOX シュリンク付"},
 ]
 # ────────────────────────────────────────────────
 
@@ -32,11 +31,13 @@ REQUEST_DELAY_MIN = 5                     # リクエスト間の最小待機時
 REQUEST_DELAY_MAX = 10                    # リクエスト間の最大待機時間(秒)
 MAX_ITEMS = 30                            # 取得する最大商品数
 SCROLL_COUNT = 2                          # スクロール回数（ページ数の制限）
+DEBUG_MODE = True                         # デバッグモード（スクリーンショットなど詳細情報を出力）
 # ────────────────────────────────────────────────
 
 def run_git_command(command):
     """Gitコマンドを実行する"""
     try:
+        print(f"[DEBUG] Executing git command: {command}")
         result = subprocess.run(command, shell=True, check=True, 
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
                               text=True)
@@ -58,17 +59,41 @@ def commit_files(date):
     """ファイルをGitリポジトリにコミットする"""
     # ファイルをステージングに追加
     print("[INFO] Adding files to Git staging area...")
-    run_git_command(f'git add {CSV_FILE}')
+    
+    # CSVファイルを追加
+    csv_add_result = run_git_command(f'git add {CSV_FILE}')
+    print(f"[DEBUG] CSV add result: {csv_add_result}")
+    
+    # 進捗状態ファイルを追加
+    state_add_result = run_git_command(f'git add {STATE_FILE}')
+    print(f"[DEBUG] State file add result: {state_add_result}")
     
     # 日別サマリーファイルが存在する場合は追加
     summary_file = Path(f"summary_{date}.csv")
     if summary_file.exists():
-        run_git_command(f'git add {summary_file}')
+        summary_add_result = run_git_command(f'git add {summary_file}')
+        print(f"[DEBUG] Summary file add result: {summary_add_result}")
+    
+    # デバッグスクリーンショットがあれば追加
+    debug_dir = Path("debug_screenshots")
+    if debug_dir.exists() and DEBUG_MODE:
+        debug_add_result = run_git_command(f'git add {debug_dir}/*')
+        print(f"[DEBUG] Debug screenshots add result: {debug_add_result}")
+    
+    # Gitの状態を確認（デバッグ用）
+    status = run_git_command('git status')
+    print(f"[DEBUG] Git status before commit:\n{status}")
     
     # コミットする
     print("[INFO] Committing changes...")
     commit_message = f"data: メルカリ価格データ更新 ({date})"
-    run_git_command(f'git commit -m "{commit_message}"')
+    commit_result = run_git_command(f'git commit -m "{commit_message}"')
+    
+    if commit_result:
+        print(f"[INFO] Commit result: {commit_result}")
+    else:
+        print("[WARN] Nothing to commit or commit failed")
+        return False
     
     # 変更をプッシュ
     print("[INFO] Pushing changes to remote repository...")
@@ -76,8 +101,10 @@ def commit_files(date):
     
     if push_result is not None:
         print("[INFO] Successfully pushed changes to Git repository")
+        return True
     else:
         print("[ERROR] Failed to push changes to Git repository")
+        return False
 
 def load_state():
     """進捗状態を読み込む。存在しない場合は新規作成"""
@@ -100,19 +127,28 @@ def save_state(state):
     try:
         with STATE_FILE.open("w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+        print(f"[INFO] 進捗状態を保存しました: {STATE_FILE}")
     except Exception as e:
         print(f"[ERROR] 状態ファイル保存エラー: {e}")
 
 def fetch_prices(keyword: str, retry_count=0) -> list[int]:
     """指定したキーワードでメルカリを検索し、販売中商品の価格リストを返す（ページ数制限あり）"""
+    # 以前成功したURLパターン + 最小のオプション
     url = (
         "https://jp.mercari.com/search"
         f"?keyword={quote_plus(keyword)}"
         "&sort=score&order=desc&item_status=on_sale"
-        "&price_min=5000"     # 最低価格5,000円以上を指定
     )
     
     print(f"[INFO] 検索URL: {url}")
+    
+    # デバッグディレクトリを作成
+    if DEBUG_MODE:
+        debug_dir = Path("debug_screenshots")
+        debug_dir.mkdir(exist_ok=True)
+        
+        # 商品名に使えない文字をアンダースコアに置換
+        safe_keyword = re.sub(r'[\\/*?:"<>|]', "_", keyword)
     
     prices = []
     with sync_playwright() as p:
@@ -126,54 +162,75 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
         page.set_default_navigation_timeout(NAV_TIMEOUT)
         
         try:
+            # 初期読み込み
             page.goto(url, wait_until="domcontentloaded")
             print(f"[INFO] ページ読み込み完了: {keyword}")
             
-            # 初期表示の待機時間
+            # 初期表示の待機時間（長めに設定）
             print("[INFO] 初期ページ表示待機中...")
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(8000)  # 8秒待機
             
-            # 複数のセレクタを試す
+            # デバッグスクリーンショット（初期表示）
+            if DEBUG_MODE:
+                screenshot_path = debug_dir / f"{safe_keyword}_initial.png"
+                page.screenshot(path=str(screenshot_path))
+                print(f"[DEBUG] 初期表示スクリーンショット: {screenshot_path}")
+            
+            # 以前成功したセレクタを優先的に試す
             selectors = [
+                '.merPrice',              # 以前成功したセレクタ
+                '[data-testid="item-price"]',
+                '.merItemThumbnail__price',
+                '.merItem__price',
+                '[data-location="search"] [data-testid="price"]',
+                '.item-price',            # 汎用的なセレクタも追加
+                '[class*="price"]',       # "price"を含むクラス
+                '.mer-item-price'         # ケバブケース形式
+            ]
+            
+            # まずアイテムセルセレクタを探す（存在確認）
+            item_selectors = [
                 '[data-testid="item-cell"]',
                 '.merItemThumbnail',
                 'mer-item-thumbnail',
-                '[data-location="search"] [data-testid="thumbnail"]',
-                ".merItem"
+                '.merItem',
+                '.item-card',
+                '.product-item' 
             ]
             
-            # いずれかのセレクタが見つかるまで待機
-            found_selector = None
-            for selector in selectors:
+            item_selector_found = False
+            for selector in item_selectors:
                 try:
-                    print(f"[INFO] Trying selector: {selector}")
-                    page.wait_for_selector(selector, timeout=15000)
-                    print(f"[INFO] Found items with selector: {selector}")
-                    found_selector = selector
-                    break
-                except PWTimeout:
-                    print(f"[INFO] Selector not found: {selector}")
+                    count = page.locator(selector).count()
+                    if count > 0:
+                        print(f"[INFO] Found {count} items with selector: {selector}")
+                        item_selector_found = True
+                        break
+                except Exception as e:
+                    print(f"[WARN] Error checking item selector {selector}: {e}")
             
-            # 制限されたスクロール回数で価格を収集
-            print(f"[INFO] {SCROLL_COUNT}ページ分の商品データを収集します")
-            for step in range(1, SCROLL_COUNT + 1):
-                print(f"[INFO] Scroll step {step}/{SCROLL_COUNT}")
+            if not item_selector_found:
+                print(f"[WARN] No item selectors found for {keyword}, but continuing anyway")
+            
+            # ゆっくりスクロール（成功したパターンを再現）
+            for step in range(1, 5):  # 4回スクロール
+                print(f"[INFO] Scroll step {step}/4")
                 page.mouse.wheel(0, 1000)
-                time.sleep(2)  # スクロール後の待機
-            
-            # 複数の価格セレクタを試す
-            price_selectors = [
-                '[data-testid="item-price"]',
-                '.merPrice',
-                '.merItemThumbnail__price',
-                '.merItem__price',
-                '[data-location="search"] [data-testid="price"]'
-            ]
+                time.sleep(3)  # 各スクロール後に3秒待機
+                
+                # スクロール後のスクリーンショット
+                if DEBUG_MODE:
+                    screenshot_path = debug_dir / f"{safe_keyword}_scroll_{step}.png"
+                    page.screenshot(path=str(screenshot_path))
+                    print(f"[DEBUG] スクロール{step}後のスクリーンショット: {screenshot_path}")
             
             # DOM から価格を取得する試み
             dom_prices = []
-            for price_selector in price_selectors:
+            for price_selector in selectors:
                 try:
+                    print(f"[INFO] Trying price selector: {price_selector}")
+                    
+                    # セレクタの要素を取得
                     elements = page.locator(price_selector).all()
                     if elements:
                         texts = [elem.text_content() for elem in elements if elem.is_visible()]
@@ -181,7 +238,11 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                         if texts:
                             print(f"[INFO] Found {len(texts)} prices with selector: {price_selector}")
                             
-                            # 取得する最大商品数に制限
+                            # テキスト内容のデバッグログ
+                            if len(texts) > 0:
+                                print(f"[DEBUG] サンプルテキスト: {texts[:3]}")
+                            
+                            # 制限を適用
                             if len(texts) > MAX_ITEMS:
                                 print(f"[INFO] 商品数を{MAX_ITEMS}に制限します")
                                 texts = texts[:MAX_ITEMS]
@@ -194,7 +255,9 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                                         try:
                                             price_str = match.group(1).replace(',', '')
                                             price = int(price_str)
-                                            dom_prices.append(price)
+                                            # 妥当な価格範囲（例：5,000円〜100,000円）
+                                            if 5000 <= price <= 100000:
+                                                dom_prices.append(price)
                                         except ValueError:
                                             pass
                             
@@ -204,25 +267,81 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
                 except Exception as e:
                     print(f"[WARN] Error with price selector {price_selector}: {e}")
             
+            # JavaScript評価による直接抽出も試みる（成功したパターン）
+            if not dom_prices:
+                try:
+                    for price_selector in selectors:
+                        print(f"[INFO] Trying JS evaluation with selector: {price_selector}")
+                        
+                        try:
+                            # JavaScript を使って要素のテキストを取得
+                            texts = page.eval_on_selector_all(
+                                price_selector,
+                                'els => els.map(e => e.textContent)'
+                            )
+                            
+                            if texts:
+                                print(f"[INFO] Found {len(texts)} prices with JS eval: {price_selector}")
+                                
+                                # 価格テキストから数字だけを抽出
+                                js_prices = []
+                                for t in texts:
+                                    if t and re.search(r"\d", t):
+                                        match = re.search(r'[¥￥]([0-9,]+)', t)
+                                        if match:
+                                            try:
+                                                price_str = match.group(1).replace(',', '')
+                                                price = int(price_str)
+                                                if 5000 <= price <= 100000:
+                                                    js_prices.append(price)
+                                            except ValueError:
+                                                pass
+                                
+                                if js_prices:
+                                    print(f"[DEBUG] JS eval price count = {len(js_prices)}")
+                                    dom_prices = js_prices
+                                    break
+                        except Exception as e:
+                            print(f"[WARN] JS eval error with {price_selector}: {e}")
+                except Exception as e:
+                    print(f"[WARN] JS evaluation error: {e}")
+            
             # 価格が見つからない場合は正規表現で直接検索
             if not dom_prices:
+                print("[INFO] No prices found with selectors, checking page content")
                 html = page.content()
+                
+                # HTMLソースを保存（デバッグ用）
+                if DEBUG_MODE:
+                    html_path = debug_dir / f"{safe_keyword}_source.html"
+                    with html_path.open("w", encoding="utf-8") as f:
+                        f.write(html)
+                    print(f"[DEBUG] HTMLソース保存: {html_path}")
+                
+                # 価格パターンを直接検索
                 price_pattern = r'[¥￥]([0-9,]+)'
                 direct_prices = re.findall(price_pattern, html)
                 if direct_prices:
                     print(f"[INFO] Found {len(direct_prices)} prices with direct regex")
-                    # 取得する最大商品数に制限
-                    if len(direct_prices) > MAX_ITEMS:
-                        direct_prices = direct_prices[:MAX_ITEMS]
-                        
+                    regex_prices = []
                     for p in direct_prices:
                         if re.search(r"\d", p):
                             try:
                                 price = int(re.sub(r"[^\d]", "", p))
-                                if 1000 <= price <= 100000:  # 妥当な価格範囲のみ
-                                    dom_prices.append(price)
+                                if 5000 <= price <= 100000:
+                                    regex_prices.append(price)
                             except ValueError:
                                 pass
+                    
+                    if regex_prices:
+                        print(f"[DEBUG] Direct regex price count = {len(regex_prices)}")
+                        dom_prices = regex_prices
+            
+            # 最終スクリーンショット
+            if DEBUG_MODE:
+                screenshot_path = debug_dir / f"{safe_keyword}_final.png"
+                page.screenshot(path=str(screenshot_path))
+                print(f"[DEBUG] 最終スクリーンショット: {screenshot_path}")
             
             prices = dom_prices
             
@@ -249,7 +368,7 @@ def fetch_prices(keyword: str, retry_count=0) -> list[int]:
     # 価格リストを処理
     if prices:
         prices.sort()
-        print(f"[DEBUG] 価格一覧（上位5件）: {prices[:5]}...")
+        print(f"[DEBUG] 価格一覧（上位10件）: {prices[:10]}...")
         
         # 外れ値 10 % カット
         if len(prices) >= 10:
@@ -343,34 +462,29 @@ def generate_daily_summary(date, results):
 
 def main():
     """メイン処理：バッチ処理で商品情報を取得、結果をGitにコミット"""
-    # Git設定
-    setup_git()
-    
-    today = dt.date.today().isoformat()
-    
-    # 状態を読み込み
-    state = load_state()
-    
-    # 今日既に完了している場合はスキップ
-    if state["last_update"] == today and len(state["completed"]) == len(PRODUCTS):
-        print(f"[INFO] 本日 ({today}) の処理は既に完了しています")
-        return
-    
-    # 日付が変わった場合は状態をリセット
-    if state["last_update"] != today:
-        print(f"[INFO] 新しい日付 ({today}) で処理を開始します")
+    try:
+        # Git設定
+        setup_git()
+        
+        today = dt.date.today().isoformat()
+        
+        # 古いステートを削除して新規作成（強制的に再実行）
+        if STATE_FILE.exists():
+            STATE_FILE.unlink()
+            print("[INFO] 既存の進捗状態ファイルを削除しました")
+        
+        # 状態を新規作成
         state = {
             "last_update": today,
             "completed": [],
             "results": {}
         }
         save_state(state)
-    
-    all_results = []
-    
-    try:
-        # 未処理の商品を抽出
-        pending_products = [p for p in PRODUCTS if p["name"] not in state["completed"]]
+        
+        all_results = []
+        
+        # 全商品を処理
+        pending_products = PRODUCTS
         
         # バッチに分割して処理
         for i in range(0, len(pending_products), BATCH_SIZE):
@@ -381,13 +495,6 @@ def main():
             
             batch_results = process_batch(batch, state)
             all_results.extend(batch_results)
-            
-            # 既に完了している商品の結果も追加
-            for product in PRODUCTS:
-                if product["name"] in state["completed"] and product["name"] not in [name for name, _ in all_results]:
-                    price = state["results"].get(product["name"])
-                    if price is not None:
-                        all_results.append((product["name"], price))
             
             # バッチ間の待機時間
             if i + BATCH_SIZE < len(pending_products):
@@ -405,16 +512,24 @@ def main():
             # 日別サマリーを生成
             generate_daily_summary(today, all_results)
             
-            # ファイルをGitにコミットしてプッシュ
-            commit_files(today)
-            
+            # 状態を更新
             state["last_update"] = today
             save_state(state)
+            
+            # ファイルをGitにコミットしてプッシュ
+            commit_success = commit_files(today)
+            if commit_success:
+                print("[INFO] データが正常にGitリポジトリに更新されました")
+            else:
+                print("[WARN] Gitリポジトリの更新に問題がありました")
         
     except KeyboardInterrupt:
         print("\n[INFO] ユーザーによる中断を検出しました。進捗は保存されています。")
     except Exception as e:
         print(f"\n[ERROR] 処理中にエラーが発生しました: {e}")
+        print(f"[DEBUG] エラーの詳細: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         print("[INFO] これまでの進捗は保存されています。")
 
 if __name__ == "__main__":
