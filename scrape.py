@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced Playwright script for Mercari search scraping.
-Improves reliability with better selectors and fallback mechanisms.
+複数キーワード対応メルカリ価格収集ボット（最終版）
+前回成功したコードをベースに、複数商品の中央値を取得
 """
 
 import json, re, csv, sys, time, datetime as dt
@@ -10,23 +10,27 @@ from urllib.parse import quote_plus
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ── ここを書き替えて他はそのまま ─────────────────────
-KEYWORD      = "ロケット団の栄光 BOX シュリンク付 新品"
-PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付・新品）"
+# ── 検索対象商品リスト ─────────────────────────────
+PRODUCTS = [
+    {"name": "ロケット団の栄光 BOX", "keyword": "ロケット団の栄光 BOX シュリンク付"},
+    {"name": "ポケモン151 BOX", "keyword": "ポケモン151 BOX　シュリンク付"},
+    {"name": "クレイバースト BOX", "keyword": "クレイバースト BOX シュリンク付"},
+    {"name": "パラダイムトリガー BOX", "keyword": "パラダイムトリガー BOX シュリンク付"},
+    {"name": "シャイニートレジャーex BOX", "keyword": "シャイニートレジャーex BOX シュリンク付"},
+]
 # ────────────────────────────────────────────────
 
 CSV_FILE    = Path("latest.csv")
 NAV_TIMEOUT = 90_000   # ms
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+REQUEST_DELAY = 5  # 検索リクエスト間の待機時間（秒）
 
 def fetch_prices(keyword: str) -> list[int]:
     url = (
         "https://jp.mercari.com/search"
         f"?keyword={quote_plus(keyword)}"
         "&sort=score&order=desc&item_status=on_sale"
-        "&price_min=5000"     # 最低価格を5,000円に下げる
-        # カテゴリIDは一時的に除外
-        # 商品状態の条件も一時的に除外
+        "&price_min=5000"     # 最低価格5,000円以上を指定
     )
     
     prices = []
@@ -156,26 +160,6 @@ def fetch_prices(keyword: str) -> list[int]:
                         if it.get("status") in ("STATUS_ON_SALE", "on_sale") or "status" not in it
                     ]
                     print(f"[DEBUG] JSON price count = {len(json_prices)}")
-                
-                # APIレスポンスもチェック
-                for req in page.request.all():
-                    if req.url and "api" in req.url and "search" in req.url:
-                        try:
-                            resp = req.response()
-                            if resp:
-                                resp_text = resp.text()
-                                resp_json = json.loads(resp_text)
-                                api_items = recurse(resp_json)
-                                api_prices = [
-                                    it["price"] for it in api_items
-                                    if "price" in it and isinstance(it["price"], int)
-                                ]
-                                if api_prices:
-                                    print(f"[DEBUG] API price count = {len(api_prices)}")
-                                    json_prices.extend(api_prices)
-                        except Exception as e:
-                            print(f"[WARN] Error parsing API response: {e}")
-            
             except Exception as e:
                 print(f"[WARN] JSON parse error: {e}")
             
@@ -183,14 +167,6 @@ def fetch_prices(keyword: str) -> list[int]:
             prices = json_prices or dom_prices
             print(f"[DEBUG] final DOM price count = {len(dom_prices)}")
             print(f"[DEBUG] final JSON price count = {len(json_prices)}")
-            
-            # スクリーンショットを撮影してデバッグ（必要に応じて）
-            try:
-                screenshot_path = Path("debug_screenshot.png")
-                page.screenshot(path=str(screenshot_path))
-                print(f"[DEBUG] Screenshot saved to {screenshot_path}")
-            except Exception as e:
-                print(f"[WARN] Failed to save screenshot: {e}")
                 
         except Exception as e:
             print(f"[ERROR] Navigation/scraping error: {e}")
@@ -208,27 +184,56 @@ def fetch_prices(keyword: str) -> list[int]:
     
     return prices
 
-def append_csv(date: str, product: str, price: int | None):
-    header = ["Date", "Product", "PriceJPY"]
+def append_csv(date: str, results: list[tuple[str, int]]):
+    """結果をCSVファイルに追記"""
+    header = ["Date"] + [product['name'] for product in PRODUCTS]
     need_header = not CSV_FILE.exists()
+    
+    # 結果を辞書に変換
+    result_dict = {name: price for name, price in results}
+    
     with CSV_FILE.open("a", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         if need_header:
             w.writerow(header)
-        w.writerow([date, product, price if price is not None else "NA"])
+        
+        # 商品名順にデータを並べる
+        row = [date]
+        for product in PRODUCTS:
+            price = result_dict.get(product['name'])
+            row.append(price if price is not None else "NA")
+        
+        w.writerow(row)
+    
+    print(f"[INFO] CSV出力完了: {CSV_FILE}")
 
 def main():
     today = dt.date.today().isoformat()
+    results = []
+    
     try:
-        prices = fetch_prices(KEYWORD)
-        if prices:
-            med = round(median(prices))
-            append_csv(today, PRODUCT_NAME, med)
-            print(f"Appended {today}, price={med}")
-        else:
-            print("[WARN] No prices found, appending NA")
-            append_csv(today, PRODUCT_NAME, None)
-            print(f"Appended {today}, price=None")
+        for i, product in enumerate(PRODUCTS):
+            # リクエスト間の待機（最初以外）
+            if i > 0:
+                print(f"[INFO] {REQUEST_DELAY}秒間待機中...")
+                time.sleep(REQUEST_DELAY)
+            
+            # 価格取得
+            print(f"\n[INFO] 「{product['name']}」の価格を取得中...")
+            prices = fetch_prices(product['keyword'])
+            
+            if prices:
+                med = round(median(prices))
+                results.append((product['name'], med))
+                print(f"[INFO] 「{product['name']}」の中央値: {med}円（{len(prices)}件）")
+            else:
+                print(f"[WARN] 「{product['name']}」の価格データがありません")
+                results.append((product['name'], None))
+        
+        # CSVに結果を追記
+        append_csv(today, results)
+        print(f"\n[INFO] {len(results)}件の商品データを{today}付けでCSVに追記しました")
+        
     except Exception as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
