@@ -21,7 +21,8 @@ def fetch_prices(url: str) -> list[int]:
     time.sleep(1)                              # polite delay
     res = requests.get(url, headers=HEADERS, timeout=20)
     res.raise_for_status()
-       print("HTML length =", len(res.text))
+    
+    print("HTML length =", len(res.text))
 
     soup = BeautifulSoup(res.text, "lxml")
     price_texts = soup.find_all(text=re.compile(r"¥\d[\d,]*"))
