@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 GitHub Actions で毎朝 06:00 JST に実行。
-メルカリの検索結果を Playwright で開き、
+Playwright でメルカリ検索ページを開き、
 販売中商品の中央値を latest.csv に追記します。
 """
 
@@ -11,12 +11,11 @@ from statistics import median
 from urllib.parse import quote_plus
 
 from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
 
-# ── キーワードと表示名だけ書き換えれば他はそのまま ─────────
+# ── キーワードと表示名だけ編集すれば他はそのまま ────────────────
 KEYWORD      = "ロケット団の栄光 BOX シュリンク付き"
 PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付き）"
-# ────────────────────────────────────────
+# ───────────────────────────────────────────────
 
 CSV_FILE = Path("latest.csv")
 
@@ -33,22 +32,27 @@ def fetch_prices(keyword: str) -> list[int]:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(locale="ja-JP")
         page.goto(url, timeout=30_000)
-        # 商品カードが描画されるまで待機
-        page.wait_for_selector('li[data-testid="item-cell"]', timeout=30_000)
-        html = page.content()
+
+        # 価格要素がロードされるまで待機
+        page.wait_for_selector('[data-testid="item-price"]', timeout=30_000)
+
+        # すべての価格テキストを取得
+        texts = page.locator('[data-testid="item-price"]').all_text_contents()
         browser.close()
 
-    soup = BeautifulSoup(html, "lxml")
-    # 価格をすべて抽出（¥12,345 / ¥ 12,345 両対応）
+    # "¥12,345" → 12345 に変換
     prices = [
-        int(m.group(1).replace(",", ""))
-        for m in re.finditer(r"¥\s*([\d,]{3,})", soup.text)
+        int(re.sub(r"[^\d]", "", t))
+        for t in texts
+        if re.search(r"\d", t)
     ]
     prices.sort()
+
     # 外れ値 10% を除外
     if len(prices) >= 10:
         k = len(prices) // 10
         prices = prices[k : len(prices) - k]
+
     return prices
 
 
