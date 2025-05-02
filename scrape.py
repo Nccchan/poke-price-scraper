@@ -11,13 +11,14 @@ from statistics import median
 from urllib.parse import quote_plus
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-# ── キーワードと表示名だけ必要に応じて変更 ───────────────────
+# ── キーワードと表示名だけ書き替える ───────────────────────────
 KEYWORD      = "ロケット団の栄光 BOX シュリンク付き"
 PRODUCT_NAME = "ロケット団の栄光 BOX（シュリンク付き）"
-# ────────────────────────────────────────────────
+# ────────────────────────────────────────────────────
 
 CSV_FILE    = Path("latest.csv")
-NAV_TIMEOUT = 60_000         # ms
+NAV_TIMEOUT = 60_000        # 60 秒まで待機
+
 
 def fetch_prices(keyword: str) -> list[int]:
     """Playwright で検索ページを開き、販売中価格の int リストを返す"""
@@ -37,19 +38,19 @@ def fetch_prices(keyword: str) -> list[int]:
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT)
 
-            # 自動スクロールで追加商品をロード
-            for _ in range(8):          # 8×1000px = 8000px
+            # 商品を追加ロードするために数回スクロール
+            for _ in range(8):
                 page.mouse.wheel(0, 1000)
-                time.sleep(0.5)
+                time.sleep(0.4)
 
-            # DOM から価格をすべて取得
+            # data-testid="item-price" を一括取得
             texts = page.eval_on_selector_all(
-                'li[data-testid="item-cell"] span',
+                '[data-testid="item-price"]',
                 'els => els.map(e => e.textContent)'
             )
             prices = [
                 int(re.sub(r"[^\d]", "", t))
-                for t in texts if re.search(r"¥\\s*\\d", t)
+                for t in texts if re.search(r"\d", t)
             ]
             return prices
 
@@ -60,15 +61,14 @@ def fetch_prices(keyword: str) -> list[int]:
 
         browser.close()
 
-    if not prices:
-        print("[WARN] 価格が 0 件でした。キーワードや待機時間を調整してください。")
-        return []
-
-    prices.sort()
-    if len(prices) >= 10:           # 外れ値 10 % カット
-        k = len(prices) // 10
-        prices = prices[k: len(prices) - k]
+    # 件数ログ
     print(f"[INFO] ヒット件数 = {len(prices)}")
+
+    # 外れ値トリム
+    prices.sort()
+    if len(prices) >= 10:
+        k = len(prices) // 10
+        prices = prices[k : len(prices) - k]
     return prices
 
 
