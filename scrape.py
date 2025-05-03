@@ -4,9 +4,10 @@
 - ブロック回避のための対策強化
 - ヘッドレスモードとブラウザプロファイルの活用
 - より堅牢な価格抽出方法
+- GitHub Actions連携機能
 """
 
-import json, re, csv, time, datetime as dt, os, random, logging
+import json, re, csv, time, datetime as dt, os, random, logging, subprocess
 from statistics import median
 from urllib.parse import quote_plus
 from pathlib import Path
@@ -17,11 +18,103 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("scraper.log"),
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger("mercari_scraper")
+
+def run_git_command(command):
+    """Gitコマンドを実行する"""
+    try:
+        logger.info(f"Gitコマンド実行: {command}")
+        result = subprocess.run(command, shell=True, check=True, 
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                              text=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Gitコマンド失敗: {e}")
+        logger.error(f"STDOUT: {e.stdout}")
+        logger.error(f"STDERR: {e.stderr}")
+        return None
+
+def setup_git():
+    """Git設定を行う"""
+    if not GITHUB_ACTIONS:
+        logger.info("GitHub Actions連携モードが無効です。Git設定をスキップします。")
+        return False
+        
+    # Gitユーザー設定
+    run_git_command('git config --local user.name "github-actions[bot]"')
+    run_git_command('git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"')
+    logger.info("Gitユーザー設定完了")
+    return True
+
+def commit_changes(today):
+    """変更をGitリポジトリにコミット"""
+    if not GITHUB_ACTIONS:
+        return False
+        
+    try:
+        # ファイルをステージングに追加
+        logger.info("ファイルをGitステージングに追加中...")
+        
+        # CSVファイルを追加
+        run_git_command(f'git add {CSV_FILE}')
+        
+        # 状態ファイルを追加
+        if STATE_FILE.exists():
+            run_git_command(f'git add {STATE_FILE}')
+        
+        # 日別サマリーファイルの追加
+        day_dir = RESULTS_DIR / today
+        if day_dir.exists():
+            summary_file = day_dir / f"summary_{today}.csv"
+            if summary_file.exists():
+                # 結果ディレクトリが存在しない場合は作成
+                if not RESULTS_DIR.exists():
+                    RESULTS_DIR.mkdir()
+                run_git_command(f'git add {summary_file}')
+        
+        # .gitignoreファイルが存在しない場合は作成
+        gitignore_file = Path(".gitignore")
+        if not gitignore_file.exists():
+            with gitignore_file.open("w") as f:
+                f.write(f"{LOG_FILE}\n")  # ログファイルを除外
+                f.write("debug_screenshots/\n")
+                f.write("__pycache__/\n")
+                f.write("*.pyc\n")
+            run_git_command('git add .gitignore')
+            
+        # Gitの状態を確認
+        status = run_git_command('git status')
+        logger.info(f"コミット前のGit状態:\n{status}")
+        
+        # コミットする
+        logger.info("変更をコミット中...")
+        commit_message = f"data: メルカリ価格データ更新 ({today})"
+        commit_result = run_git_command(f'git commit -m "{commit_message}"')
+        
+        if not commit_result or "nothing to commit" in commit_result:
+            logger.warning("コミットするものがないか、コミットに失敗しました")
+            return False
+            
+        logger.info(f"コミット結果: {commit_result}")
+        
+        # 変更をプッシュ
+        logger.info("変更をリモートリポジトリにプッシュ中...")
+        push_result = run_git_command('git push')
+        
+        if push_result is not None:
+            logger.info("Gitリポジトリへの変更の反映に成功しました")
+            return True
+        else:
+            logger.error("Gitリポジトリへの変更のプッシュに失敗しました")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Git操作中にエラーが発生しました: {e}", exc_info=True)
+        return False
 
 # 検索対象商品リスト
 PRODUCTS = [
@@ -34,7 +127,9 @@ PRODUCTS = [
 
 # 設定パラメータ
 CSV_FILE = Path("mercari_prices.csv")
+STATE_FILE = Path("progress.json")
 RESULTS_DIR = Path("results")
+LOG_FILE = Path("scraper.log")
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
@@ -45,6 +140,7 @@ REQUEST_DELAY_MIN = 10  # より長い待機時間（秒）
 REQUEST_DELAY_MAX = 20
 MAX_RETRIES = 3
 STEALTH_MODE = True  # ブロック回避のためのステルスモード
+GITHUB_ACTIONS = True  # GitHub Actions連携モード
 
 def ensure_dirs():
     """必要なディレクトリを作成"""
