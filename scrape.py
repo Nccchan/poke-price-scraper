@@ -13,12 +13,38 @@ from urllib.parse import quote_plus
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+# ── 検索対象商品リスト ─────────────────────────────
+PRODUCTS = [
+    {"name": "ロケット団の栄光 BOX", "keyword": "ロケット団の栄光 BOX"},  # キーワードをシンプルに
+    {"name": "熱風のアリーナ BOX", "keyword": "熱風のアリーナ BOX"},
+    {"name": "バトルパートナーズ BOX", "keyword": "バトルパートナーズ BOX"},
+    {"name": "テラスタルフェスティバル BOX", "keyword": "テラスタルフェスティバル BOX"},
+    {"name": "超電ブレイカー BOX", "keyword": "超電ブレイカー BOX"},
+]
+
+# ── 設定パラメータ ─────────────────────────────────
+CSV_FILE = Path("mercari_prices.csv")     # 結果CSV
+STATE_FILE = Path("progress.json")        # 進捗状態ファイル
+RESULTS_DIR = Path("results")             # 結果ディレクトリ
+LOG_PATH = "scraper.log"                  # ログファイル
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
+]
+REQUEST_DELAY_MIN = 10                    # リクエスト間の最小待機時間(秒)
+REQUEST_DELAY_MAX = 20                    # リクエスト間の最大待機時間(秒)
+MAX_RETRIES = 3                           # 最大リトライ回数
+STEALTH_MODE = True                       # ブロック回避のためのステルスモード
+GITHUB_ACTIONS = True                     # GitHub Actions連携モード
+
 # ロギング設定
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        logging.FileHandler(LOG_PATH),
         logging.StreamHandler()
     ]
 )
@@ -56,6 +82,17 @@ def commit_changes(today):
         return False
         
     try:
+        # .gitignoreファイルが存在しない場合は作成
+        gitignore_file = Path(".gitignore")
+        if not gitignore_file.exists():
+            with gitignore_file.open("w") as f:
+                f.write(f"{LOG_PATH}\n")  # ログファイルを除外
+                f.write("debug_screenshots/\n")
+                f.write("__pycache__/\n")
+                f.write("*.pyc\n")
+            run_git_command('git add .gitignore')
+            logger.info(".gitignoreファイルを作成しました")
+        
         # ファイルをステージングに追加
         logger.info("ファイルをGitステージングに追加中...")
         
@@ -71,21 +108,8 @@ def commit_changes(today):
         if day_dir.exists():
             summary_file = day_dir / f"summary_{today}.csv"
             if summary_file.exists():
-                # 結果ディレクトリが存在しない場合は作成
-                if not RESULTS_DIR.exists():
-                    RESULTS_DIR.mkdir()
                 run_git_command(f'git add {summary_file}')
         
-        # .gitignoreファイルが存在しない場合は作成
-        gitignore_file = Path(".gitignore")
-        if not gitignore_file.exists():
-            with gitignore_file.open("w") as f:
-                f.write(f"{LOG_FILE}\n")  # ログファイルを除外
-                f.write("debug_screenshots/\n")
-                f.write("__pycache__/\n")
-                f.write("*.pyc\n")
-            run_git_command('git add .gitignore')
-            
         # Gitの状態を確認
         status = run_git_command('git status')
         logger.info(f"コミット前のGit状態:\n{status}")
@@ -116,32 +140,6 @@ def commit_changes(today):
         logger.error(f"Git操作中にエラーが発生しました: {e}", exc_info=True)
         return False
 
-# 検索対象商品リスト
-PRODUCTS = [
-    {"name": "ロケット団の栄光 BOX", "keyword": "ロケット団の栄光 BOX"},
-    {"name": "熱風のアリーナ BOX", "keyword": "熱風のアリーナ BOX"},
-    {"name": "バトルパートナーズ BOX", "keyword": "バトルパートナーズ BOX"},
-    {"name": "テラスタルフェスティバル BOX", "keyword": "テラスタルフェスティバル BOX"},
-    {"name": "超電ブレイカー BOX", "keyword": "超電ブレイカー BOX"},
-]
-
-# 設定パラメータ
-CSV_FILE = Path("mercari_prices.csv")
-STATE_FILE = Path("progress.json")
-RESULTS_DIR = Path("results")
-LOG_FILE = Path("scraper.log")
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
-]
-REQUEST_DELAY_MIN = 10  # より長い待機時間（秒）
-REQUEST_DELAY_MAX = 20
-MAX_RETRIES = 3
-STEALTH_MODE = True  # ブロック回避のためのステルスモード
-GITHUB_ACTIONS = True  # GitHub Actions連携モード
-
 def ensure_dirs():
     """必要なディレクトリを作成"""
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -152,6 +150,31 @@ def ensure_dirs():
     day_dir.mkdir(exist_ok=True)
     
     return day_dir
+
+def load_state():
+    """進捗状態を読み込む。存在しない場合は新規作成"""
+    if STATE_FILE.exists():
+        try:
+            with STATE_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"状態ファイル読み込みエラー: {e}")
+    
+    # 初期状態
+    return {
+        "last_update": "",
+        "completed": [],
+        "results": {}
+    }
+
+def save_state(state):
+    """進捗状態を保存"""
+    try:
+        with STATE_FILE.open("w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        logger.info(f"進捗状態を保存しました: {STATE_FILE}")
+    except Exception as e:
+        logger.error(f"状態ファイル保存エラー: {e}")
 
 def extract_prices_from_html(html):
     """HTMLから価格を抽出する改良版メソッド"""
@@ -342,6 +365,32 @@ def save_results(all_results, day_dir):
     """結果をCSVに保存"""
     today = dt.date.today().isoformat()
     
+    # 状態を更新
+    state = load_state()
+    state["last_update"] = today
+    state["completed"] = [product["name"] for product in PRODUCTS]
+    
+    # 結果を状態に保存
+    for name, result in all_results:
+        if result and "prices" in result and result["prices"]:
+            state["results"][name] = {
+                "date": today,
+                "median": result["median"],
+                "min": result["min"],
+                "max": result["max"],
+                "count": result["count"]
+            }
+        else:
+            state["results"][name] = {
+                "date": today,
+                "median": None,
+                "min": None,
+                "max": None,
+                "count": 0
+            }
+    
+    save_state(state)
+    
     # メインCSVに追記
     need_header = not CSV_FILE.exists()
     with CSV_FILE.open("a", newline="", encoding="utf-8-sig") as f:
@@ -387,15 +436,35 @@ def save_results(all_results, day_dir):
                 writer.writerow([name, "データなし", "N/A", "N/A", 0])
     
     logger.info(f"日別サマリー出力完了: {summary_file}")
+    
+    return True
 
 def main():
     """メイン処理"""
     try:
         logger.info("メルカリ価格取得を開始します")
         
+        # Git設定（GitHub Actions対応）
+        git_enabled = setup_git()
+        if git_enabled:
+            logger.info("Gitリポジトリ設定完了")
+        
         # ディレクトリ準備
         day_dir = ensure_dirs()
         all_results = []
+        today = dt.date.today().isoformat()
+        
+        # 状態ファイルをリセット（毎回強制的に実行）
+        if STATE_FILE.exists():
+            STATE_FILE.unlink()
+            logger.info("既存の状態ファイルを削除しました")
+        
+        state = {
+            "last_update": today,
+            "completed": [],
+            "results": {}
+        }
+        save_state(state)
         
         for product in PRODUCTS:
             name = product["name"]
@@ -417,8 +486,23 @@ def main():
                 logger.info(f"「{name}」の結果: 中央値={result['median']}円, "
                            f"最安値={result['min']}円, 最高値={result['max']}円, "
                            f"{result['count']}件")
+                
+                # 状態ファイルに追加
+                state["completed"].append(name)
+                state["results"][name] = {
+                    "date": today,
+                    "median": result["median"],
+                    "min": result["min"], 
+                    "max": result["max"],
+                    "count": result["count"]
+                }
+                save_state(state)
             else:
                 logger.warning(f"「{name}」の価格データがありません")
+                # データなしでも完了としてマーク
+                state["completed"].append(name)
+                state["results"][name] = None
+                save_state(state)
             
             all_results.append((name, result))
             
@@ -431,6 +515,13 @@ def main():
         # 結果の保存
         save_results(all_results, day_dir)
         logger.info("全商品の処理が完了しました")
+        
+        # Gitコミット
+        if git_enabled:
+            if commit_changes(today):
+                logger.info("データが正常にGitリポジトリに更新されました")
+            else:
+                logger.warning("Gitリポジトリの更新に問題がありました")
         
     except KeyboardInterrupt:
         logger.info("ユーザーによる中断を検出しました")
