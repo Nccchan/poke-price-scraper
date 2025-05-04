@@ -1,532 +1,282 @@
 #!/usr/bin/env python3
 """
-シンプル化されたメルカリ価格取得スクリプト
-- ブロック回避のための対策強化
-- ヘッドレスモードとブラウザプロファイルの活用
-- より堅牢な価格抽出方法
-- GitHub Actions連携機能
+GitHub Actions向けメルカリ価格収集スクリプト
+- Gitエラー回避に特化
+- スクレイピング機能を単純化
 """
 
-import json, re, csv, time, datetime as dt, os, random, logging, subprocess
-from statistics import median
-from urllib.parse import quote_plus
+import subprocess, time, random, re, csv, json
+from datetime import date
 from pathlib import Path
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from urllib.parse import quote_plus
+from statistics import median
+from playwright.sync_api import sync_playwright
 
-# ── 検索対象商品リスト ─────────────────────────────
+# 商品リスト
 PRODUCTS = [
-    {"name": "ロケット団の栄光 BOX", "keyword": "ロケット団の栄光 BOX"},  # キーワードをシンプルに
+    {"name": "ロケット団の栄光 BOX", "keyword": "ロケット団の栄光 BOX"},
     {"name": "熱風のアリーナ BOX", "keyword": "熱風のアリーナ BOX"},
     {"name": "バトルパートナーズ BOX", "keyword": "バトルパートナーズ BOX"},
-    {"name": "テラスタルフェスティバル BOX", "keyword": "テラスタルフェスティバル BOX"},
+    {"name": "テラスタルフェス BOX", "keyword": "テラスタルフェス BOX"},
     {"name": "超電ブレイカー BOX", "keyword": "超電ブレイカー BOX"},
 ]
 
-# ── 設定パラメータ ─────────────────────────────────
-CSV_FILE = Path("mercari_prices.csv")     # 結果CSV
-STATE_FILE = Path("progress.json")        # 進捗状態ファイル
-RESULTS_DIR = Path("results")             # 結果ディレクトリ
-LOG_PATH = "scraper.log"                  # ログファイル
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
-]
-REQUEST_DELAY_MIN = 10                    # リクエスト間の最小待機時間(秒)
-REQUEST_DELAY_MAX = 20                    # リクエスト間の最大待機時間(秒)
-MAX_RETRIES = 3                           # 最大リトライ回数
-STEALTH_MODE = True                       # ブロック回避のためのステルスモード
-GITHUB_ACTIONS = True                     # GitHub Actions連携モード
+# 設定
+CSV_FILE = "mercari_prices.csv"
+SUMMARY_DIR = "summaries"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
-# ロギング設定
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler()
+# プリントラッパー
+def print_log(message):
+    print(f"[INFO] {message}")
+
+# Git処理を最初に実行
+def setup_git_environment():
+    """GitHub Actions環境でのGit環境セットアップ"""
+    # 最初にgitignoreを作成して不要なファイルを除外
+    gitignore_content = """
+# 自動生成ファイル
+*.log
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# スクレイピング一時ファイル
+debug_screenshots/
+*.html
+"""
+    
+    with open(".gitignore", "w") as f:
+        f.write(gitignore_content)
+    
+    # 実行コマンドをリストに保持
+    commands = [
+        "git config --local user.name 'github-actions[bot]'",
+        "git config --local user.email '41898282+github-actions[bot]@users.noreply.github.com'",
+        "git add .gitignore",
+        "git commit -m 'chore: Add gitignore file'"
     ]
-)
-logger = logging.getLogger("mercari_scraper")
-
-def run_git_command(command):
-    """Gitコマンドを実行する"""
+    
+    # 一度全ての未追跡・変更ファイルをリセット
+    print_log("Git環境を初期化中...")
+    
+    # 未コミットの変更をリセット
     try:
-        logger.info(f"Gitコマンド実行: {command}")
-        result = subprocess.run(command, shell=True, check=True, 
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
-                              text=True)
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Gitコマンド失敗: {e}")
-        logger.error(f"STDOUT: {e.stdout}")
-        logger.error(f"STDERR: {e.stderr}")
-        return None
-
-def setup_git():
-    """Git設定を行う"""
-    if not GITHUB_ACTIONS:
-        logger.info("GitHub Actions連携モードが無効です。Git設定をスキップします。")
-        return False
-        
-    # Gitユーザー設定
-    run_git_command('git config --local user.name "github-actions[bot]"')
-    run_git_command('git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"')
-    logger.info("Gitユーザー設定完了")
-    return True
-
-def commit_changes(today):
-    """変更をGitリポジトリにコミット"""
-    if not GITHUB_ACTIONS:
-        return False
-        
-    try:
-        # .gitignoreファイルが存在しない場合は作成
-        gitignore_file = Path(".gitignore")
-        if not gitignore_file.exists():
-            with gitignore_file.open("w") as f:
-                f.write(f"{LOG_PATH}\n")  # ログファイルを除外
-                f.write("debug_screenshots/\n")
-                f.write("__pycache__/\n")
-                f.write("*.pyc\n")
-            run_git_command('git add .gitignore')
-            logger.info(".gitignoreファイルを作成しました")
-        
-        # ファイルをステージングに追加
-        logger.info("ファイルをGitステージングに追加中...")
-        
-        # CSVファイルを追加
-        run_git_command(f'git add {CSV_FILE}')
-        
-        # 状態ファイルを追加
-        if STATE_FILE.exists():
-            run_git_command(f'git add {STATE_FILE}')
-        
-        # 日別サマリーファイルの追加
-        day_dir = RESULTS_DIR / today
-        if day_dir.exists():
-            summary_file = day_dir / f"summary_{today}.csv"
-            if summary_file.exists():
-                run_git_command(f'git add {summary_file}')
-        
-        # Gitの状態を確認
-        status = run_git_command('git status')
-        logger.info(f"コミット前のGit状態:\n{status}")
-        
-        # コミットする
-        logger.info("変更をコミット中...")
-        commit_message = f"data: メルカリ価格データ更新 ({today})"
-        commit_result = run_git_command(f'git commit -m "{commit_message}"')
-        
-        if not commit_result or "nothing to commit" in commit_result:
-            logger.warning("コミットするものがないか、コミットに失敗しました")
-            return False
-            
-        logger.info(f"コミット結果: {commit_result}")
-        
-        # 変更をプッシュ
-        logger.info("変更をリモートリポジトリにプッシュ中...")
-        push_result = run_git_command('git push')
-        
-        if push_result is not None:
-            logger.info("Gitリポジトリへの変更の反映に成功しました")
-            return True
-        else:
-            logger.error("Gitリポジトリへの変更のプッシュに失敗しました")
-            return False
-            
+        subprocess.run("git reset --hard", shell=True, check=False)
+        print_log("Git変更をリセットしました")
     except Exception as e:
-        logger.error(f"Git操作中にエラーが発生しました: {e}", exc_info=True)
-        return False
-
-def ensure_dirs():
-    """必要なディレクトリを作成"""
-    RESULTS_DIR.mkdir(exist_ok=True)
+        print(f"[WARN] Git resetエラー: {e}")
     
-    # 日付別ディレクトリ
-    today = dt.date.today().isoformat()
-    day_dir = RESULTS_DIR / today
-    day_dir.mkdir(exist_ok=True)
-    
-    return day_dir
+    # 未追跡ファイルを削除
+    try:
+        subprocess.run("git clean -fd", shell=True, check=False)
+        print_log("未追跡ファイルをクリーンアップしました")
+    except Exception as e:
+        print(f"[WARN] Git cleanエラー: {e}")
 
-def load_state():
-    """進捗状態を読み込む。存在しない場合は新規作成"""
-    if STATE_FILE.exists():
+    # コマンドを実行
+    for cmd in commands:
         try:
-            with STATE_FILE.open("r", encoding="utf-8") as f:
-                return json.load(f)
+            subprocess.run(cmd, shell=True, check=False)
+            print_log(f"実行: {cmd}")
         except Exception as e:
-            logger.warning(f"状態ファイル読み込みエラー: {e}")
+            print(f"[WARN] コマンド実行エラー: {cmd} - {e}")
     
-    # 初期状態
-    return {
-        "last_update": "",
-        "completed": [],
-        "results": {}
-    }
+    print_log("Git環境の準備完了")
+    
+    # サマリーディレクトリを作成
+    Path(SUMMARY_DIR).mkdir(exist_ok=True)
 
-def save_state(state):
-    """進捗状態を保存"""
-    try:
-        with STATE_FILE.open("w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-        logger.info(f"進捗状態を保存しました: {STATE_FILE}")
-    except Exception as e:
-        logger.error(f"状態ファイル保存エラー: {e}")
-
-def extract_prices_from_html(html):
-    """HTMLから価格を抽出する改良版メソッド"""
-    prices = []
+# 価格取得機能
+def get_mercari_prices(keyword):
+    """メルカリから価格を取得"""
+    print_log(f"「{keyword}」の価格を取得中...")
     
-    # 価格パターン（シンプル化）
-    patterns = [
-        r'[¥￥]\s*([0-9,]+)',              # ¥12,345
-        r'([0-9,]+)円',                    # 12,345円
-        r'class="[^"]*price[^"]*"[^>]*>\s*[¥￥]?\s*([0-9,]+)', # 各種価格要素
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, html)
-        if matches:
-            logger.info(f"パターン '{pattern}' で {len(matches)} 件の価格を検出")
-            
-            for match in matches:
-                try:
-                    # コンマと空白を除去
-                    price_str = match.replace(',', '').replace(' ', '')
-                    price = int(price_str)
-                    
-                    # 妥当な価格範囲かチェック (ポケモンカードBOXとしては5,000円～50,000円が一般的)
-                    if 5000 <= price <= 50000:
-                        prices.append(price)
-                except ValueError:
-                    pass  # 数値変換エラーは無視
-    
-    return prices
-
-def setup_browser_context(playwright):
-    """ブラウザ検出回避のためのコンテキスト設定"""
-    # ランダムなユーザーエージェント
-    user_agent = random.choice(USER_AGENTS)
-    logger.info(f"使用するUA: {user_agent}")
-    
-    # ブラウザを起動
-    if STEALTH_MODE:
-        # ステルスモード設定（検出回避）
-        browser = playwright.firefox.launch(
-            headless=False,  # Firefoxはヘッドレスモードの検出が困難
-            slow_mo=50,      # 人間らしい動きの再現
-        )
-        context = browser.new_context(
-            user_agent=user_agent,
-            locale="ja-JP",
-            timezone_id="Asia/Tokyo",
-            viewport={"width": 1366 + random.randint(-50, 50), "height": 768 + random.randint(-30, 30)},
-            color_scheme="light",
-        )
-    else:
-        # 通常モード
-        browser = playwright.chromium.launch(headless=False)
-        context = browser.new_context(
-            user_agent=user_agent,
-            locale="ja-JP",
-            viewport={"width": 1280, "height": 800}
-        )
-    
-    # 人間らしいブラウザフィンガープリントを設定
-    context.add_init_script("""
-    // WebGL, Canvas, AudioContext fingerprinting randomization
-    const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(parameter) {
-        // Randomize certain WebGL parameters
-        if (parameter === 37445) {
-            return 'Intel Inc.';
-        }
-        if (parameter === 37446) {
-            return 'Intel Iris Graphics';
-        }
-        return originalGetParameter.call(this, parameter);
-    };
-    """)
-    
-    # 言語設定のCookie
-    context.add_cookies([
-        {"name": "country", "value": "jp", "domain": "jp.mercari.com", "path": "/"},
-        {"name": "lang", "value": "ja", "domain": "jp.mercari.com", "path": "/"}
-    ])
-    
-    return browser, context
-
-def fetch_mercari_prices(keyword, day_dir, retry_count=0):
-    """メルカリから商品価格を取得"""
-    # 検索URL（シンプル化）
+    # 検索URL
     encoded_keyword = quote_plus(keyword)
     url = f"https://jp.mercari.com/search?keyword={encoded_keyword}&status=on_sale"
     
-    logger.info(f"検索URL: {url}")
-    safe_keyword = re.sub(r'[\\/*?:"<>|]', "_", keyword)
-    
     prices = []
+    
     with sync_playwright() as p:
         try:
-            browser, context = setup_browser_context(p)
+            browser = p.firefox.launch(headless=True)
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                locale="ja-JP",
+                viewport={"width": 1366, "height": 768}
+            )
+            
             page = context.new_page()
-            page.set_default_navigation_timeout(60000)  # 60秒タイムアウト
-            
-            # ブロック回避の待機
-            wait_time = random.randint(1, 3)
-            logger.info(f"ブラウザ準備完了、{wait_time}秒待機...")
-            time.sleep(wait_time)
-            
-            # ページアクセス
-            logger.info(f"ページアクセス開始: {url}")
             page.goto(url, wait_until="domcontentloaded")
             
-            # 初期読み込み待機
-            logger.info("ページコンテンツ読み込み待機中...")
+            # 待機してコンテンツ読み込み
+            time.sleep(5)
             
-            # コンテンツが読み込まれるまでの待機（最大30秒）
-            try:
-                page.wait_for_selector("body", timeout=30000)
-                time.sleep(5)  # 追加待機
-            except Exception as e:
-                logger.warning(f"セレクタ待機エラー: {e}")
+            # スクロール
+            for _ in range(3):
+                page.mouse.wheel(0, 500)
+                time.sleep(1)
             
-            # スクロール（人間らしい動きで）
-            logger.info("ページをスクロールして商品読み込み...")
-            for i in range(1, 5):
-                # ランダムな距離でスクロール
-                scroll_amount = random.randint(600, 800)
-                page.mouse.wheel(0, scroll_amount)
-                
-                # 自然な間隔で待機
-                wait_ms = random.randint(1000, 3000)
-                page.wait_for_timeout(wait_ms)
-                
-                # たまにマウス移動（より人間らしく）
-                if random.random() > 0.7:
-                    page.mouse.move(
-                        random.randint(100, 1000),
-                        random.randint(100, 600)
-                    )
-            
-            # 十分な待機後にHTMLを取得
-            time.sleep(3)
+            # HTML取得
             html = page.content()
             
-            # HTMLをファイルに保存（デバッグ用）
-            html_path = day_dir / f"{safe_keyword}_source.html"
-            with html_path.open("w", encoding="utf-8") as f:
-                f.write(html)
+            # 価格抽出
+            price_patterns = [
+                r'[¥￥]\s*([0-9,]+)',  # ¥12,345
+                r'([0-9,]+)円',        # 12,345円
+            ]
             
-            # スクリーンショット保存
-            screenshot_path = day_dir / f"{safe_keyword}_screenshot.png"
-            page.screenshot(path=str(screenshot_path))
-            logger.info(f"スクリーンショット保存: {screenshot_path}")
+            for pattern in price_patterns:
+                matches = re.findall(pattern, html)
+                for match in matches:
+                    try:
+                        price_str = match.replace(',', '').replace(' ', '')
+                        price = int(price_str)
+                        
+                        # 妥当な価格範囲
+                        if 5000 <= price <= 50000:
+                            prices.append(price)
+                    except ValueError:
+                        pass
             
-            # HTMLから価格を抽出
-            prices = extract_prices_from_html(html)
-            logger.info(f"抽出した価格データ: {len(prices)}件")
-            
-            if not prices and retry_count < MAX_RETRIES:
-                logger.warning(f"価格データなし。リトライします ({retry_count+1}/{MAX_RETRIES})")
-                browser.close()
-                time.sleep(random.randint(15, 30))  # 長めの待機
-                return fetch_mercari_prices(keyword, day_dir, retry_count + 1)
+            browser.close()
             
         except Exception as e:
-            logger.error(f"エラーが発生しました: {e}")
-            if retry_count < MAX_RETRIES:
-                logger.info(f"リトライします ({retry_count+1}/{MAX_RETRIES})")
-                time.sleep((2 ** retry_count) * 10)  # 指数バックオフ
-                return fetch_mercari_prices(keyword, day_dir, retry_count + 1)
-        finally:
-            try:
-                browser.close()
-            except:
-                pass
+            print(f"[ERROR] スクレイピングエラー: {e}")
     
-    # 価格の後処理
-    if prices:
+    # 外れ値を除外
+    if len(prices) >= 10:
         prices.sort()
-        logger.info(f"取得価格（上位10件）: {prices[:10]}")
-        
-        # 極端な値を除外（上下10%）
-        if len(prices) >= 10:
-            k = max(1, len(prices) // 10)
-            prices = prices[k:len(prices) - k]
-            logger.info(f"外れ値除外後: {len(prices)}件")
+        cut = len(prices) // 10
+        prices = prices[cut:-cut]
     
+    print_log(f"「{keyword}」の価格データ: {len(prices)}件")
     return prices
 
-def save_results(all_results, day_dir):
+# 結果保存
+def save_results(results):
     """結果をCSVに保存"""
-    today = dt.date.today().isoformat()
+    today = date.today().isoformat()
     
-    # 状態を更新
-    state = load_state()
-    state["last_update"] = today
-    state["completed"] = [product["name"] for product in PRODUCTS]
+    # メインCSVファイル
+    need_header = not Path(CSV_FILE).exists()
     
-    # 結果を状態に保存
-    for name, result in all_results:
-        if result and "prices" in result and result["prices"]:
-            state["results"][name] = {
-                "date": today,
-                "median": result["median"],
-                "min": result["min"],
-                "max": result["max"],
-                "count": result["count"]
-            }
-        else:
-            state["results"][name] = {
-                "date": today,
-                "median": None,
-                "min": None,
-                "max": None,
-                "count": 0
-            }
-    
-    save_state(state)
-    
-    # メインCSVに追記
-    need_header = not CSV_FILE.exists()
-    with CSV_FILE.open("a", newline="", encoding="utf-8-sig") as f:
+    with open(CSV_FILE, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         
         if need_header:
             writer.writerow(["日付", "商品名", "中央値価格(円)", "最安値", "最高値", "データ件数"])
         
-        for name, result in all_results:
-            if result and "prices" in result and result["prices"]:
+        for name, prices in results:
+            if prices:
                 writer.writerow([
                     today,
                     name,
-                    result["median"],
-                    result["min"],
-                    result["max"],
-                    result["count"]
+                    round(median(prices)),
+                    min(prices),
+                    max(prices),
+                    len(prices)
                 ])
             else:
                 writer.writerow([today, name, "N/A", "N/A", "N/A", 0])
     
-    logger.info(f"メインCSV出力完了: {CSV_FILE}")
-    
-    # 日別サマリーCSV
-    summary_file = day_dir / f"summary_{today}.csv"
-    with summary_file.open("w", newline="", encoding="utf-8-sig") as f:
+    # サマリーファイル
+    summary_file = f"{SUMMARY_DIR}/summary_{today}.csv"
+    with open(summary_file, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         
         writer.writerow(["収集日", today])
         writer.writerow([])
         writer.writerow(["商品名", "中央値価格(円)", "最安値", "最高値", "データ件数"])
         
-        for name, result in sorted(all_results, key=lambda x: x[0]):
-            if result and "prices" in result and result["prices"]:
+        for name, prices in sorted(results, key=lambda x: x[0]):
+            if prices:
                 writer.writerow([
                     name,
-                    result["median"],
-                    result["min"],
-                    result["max"],
-                    result["count"]
+                    round(median(prices)),
+                    min(prices),
+                    max(prices),
+                    len(prices)
                 ])
             else:
                 writer.writerow([name, "データなし", "N/A", "N/A", 0])
     
-    logger.info(f"日別サマリー出力完了: {summary_file}")
-    
-    return True
+    print_log(f"結果をCSVに保存: {CSV_FILE} および {summary_file}")
+    return CSV_FILE, summary_file
 
-def main():
-    """メイン処理"""
+# Gitコミット
+def commit_changes(files):
+    """変更をGitにコミット"""
+    today = date.today().isoformat()
+    
     try:
-        logger.info("メルカリ価格取得を開始します")
+        # 変更をステージング
+        for file in files:
+            cmd = f"git add {file}"
+            subprocess.run(cmd, shell=True, check=False)
+            print_log(f"ファイルをステージング追加: {file}")
         
-        # Git設定（GitHub Actions対応）
-        git_enabled = setup_git()
-        if git_enabled:
-            logger.info("Gitリポジトリ設定完了")
+        # コミット
+        commit_msg = f"data: メルカリ価格データ更新 ({today})"
+        subprocess.run(f'git commit -m "{commit_msg}"', shell=True, check=False)
+        print_log("変更をコミット")
         
-        # ディレクトリ準備
-        day_dir = ensure_dirs()
-        all_results = []
-        today = dt.date.today().isoformat()
+        # プッシュ
+        subprocess.run("git push", shell=True, check=False)
+        print_log("変更をリモートリポジトリにプッシュ")
         
-        # 状態ファイルをリセット（毎回強制的に実行）
-        if STATE_FILE.exists():
-            STATE_FILE.unlink()
-            logger.info("既存の状態ファイルを削除しました")
-        
-        state = {
-            "last_update": today,
-            "completed": [],
-            "results": {}
-        }
-        save_state(state)
-        
-        for product in PRODUCTS:
-            name = product["name"]
-            keyword = product["keyword"]
-            
-            logger.info(f"\n===== 「{name}」の処理開始 =====")
-            
-            prices = fetch_mercari_prices(keyword, day_dir)
-            
-            result = {}
-            if prices:
-                result = {
-                    "prices": prices,
-                    "count": len(prices),
-                    "median": round(median(prices)),
-                    "min": min(prices),
-                    "max": max(prices)
-                }
-                logger.info(f"「{name}」の結果: 中央値={result['median']}円, "
-                           f"最安値={result['min']}円, 最高値={result['max']}円, "
-                           f"{result['count']}件")
-                
-                # 状態ファイルに追加
-                state["completed"].append(name)
-                state["results"][name] = {
-                    "date": today,
-                    "median": result["median"],
-                    "min": result["min"], 
-                    "max": result["max"],
-                    "count": result["count"]
-                }
-                save_state(state)
-            else:
-                logger.warning(f"「{name}」の価格データがありません")
-                # データなしでも完了としてマーク
-                state["completed"].append(name)
-                state["results"][name] = None
-                save_state(state)
-            
-            all_results.append((name, result))
-            
-            # 次の商品の前に待機
-            if product != PRODUCTS[-1]:
-                delay = random.randint(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
-                logger.info(f"{delay}秒間待機中...")
-                time.sleep(delay)
-        
-        # 結果の保存
-        save_results(all_results, day_dir)
-        logger.info("全商品の処理が完了しました")
-        
-        # Gitコミット
-        if git_enabled:
-            if commit_changes(today):
-                logger.info("データが正常にGitリポジトリに更新されました")
-            else:
-                logger.warning("Gitリポジトリの更新に問題がありました")
-        
-    except KeyboardInterrupt:
-        logger.info("ユーザーによる中断を検出しました")
+        return True
     except Exception as e:
-        logger.error(f"処理中にエラーが発生しました: {e}", exc_info=True)
+        print(f"[ERROR] Gitコミットエラー: {e}")
+        return False
+
+# メイン処理
+def main():
+    print_log("メルカリ価格取得スクリプトを開始")
+    
+    # Git環境を準備
+    setup_git_environment()
+    
+    # 全商品の価格を取得
+    results = []
+    for product in PRODUCTS:
+        name = product["name"]
+        keyword = product["keyword"]
+        
+        prices = get_mercari_prices(keyword)
+        results.append((name, prices))
+        
+        # 次の商品の前に待機
+        if product != PRODUCTS[-1]:
+            wait_time = random.randint(5, 10)
+            print_log(f"{wait_time}秒待機中...")
+            time.sleep(wait_time)
+    
+    # 結果を保存
+    main_csv, summary_csv = save_results(results)
+    
+    # 変更をコミット
+    commit_changes([main_csv, summary_csv])
+    
+    print_log("スクリプトの実行が完了しました")
 
 if __name__ == "__main__":
     main()
